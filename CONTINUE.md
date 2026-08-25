@@ -380,6 +380,12 @@ Each of these cost real time here. They are recorded so they cost you none.
 - **Shell scripts must be LF.** A CR becomes `$'...\r'` and yields baffling
   "not found" errors. `.gitattributes` enforces it and `run.ps1` verifies rather
   than trusts.
+- **`podman machine ssh` drops a file called `NUL` in your working directory.**
+  It writes its known_hosts entry to the Windows null device, and from Git Bash
+  that resolves to a real file. `git add` then fails the whole commit with
+  `short read while indexing NUL`, which reads like repository corruption and is
+  a stray 99-byte SSH host key. `rm -f ./NUL` clears it. Check for it after any
+  `podman machine ssh`.
 - **PowerShell corrupts a string piped to a native process.** Mount scripts into
   the container instead. A PowerShell function that leaves native output on the
   success stream returns an array, not your exit code.
