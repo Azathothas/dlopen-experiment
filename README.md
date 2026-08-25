@@ -6,8 +6,34 @@ glibc, or musl — without patching host files, without a second libc, and witho
 This repo answers that with **runnable experiments**, not argument. Everything below was measured.
 
 ```powershell
-.\experiments\run.ps1        # ~2 min, needs podman or docker. Last run: 14/14 predictions held.
+.\experiments\run.ps1        # ~3 min, needs podman or docker. Last run: 22/22 predictions held.
 ```
+
+## Results
+
+A fix is implemented (`src/`), and [REPORT.md](REPORT.md) separates what was
+measured from what is still assumed. The headline numbers:
+
+| | Before | After |
+|---|---|---|
+| musl libraries in Alpine's `/usr/lib` that load into a bundled-glibc process | **2 / 247** | **247 / 247**, zero regressions |
+| the real host Vulkan ICD (`libvulkan_lvp.so`) | fails: `libc.musl-x86_64.so.1: cannot open` | loads; `vkCreateInstance` returns `VK_SUCCESS` |
+| `vkcube` rendering on Alpine | fails | **still fails** — `vkEnumeratePhysicalDevices` errors *inside lavapipe*, past symbol resolution ([REPORT.md §6](REPORT.md)) |
+
+So: **the cross-libc `dlopen` problem is solved; the musl end-to-end goal is
+not.** The remaining failure is the residual risk the design always named —
+symbol availability is necessary but not sufficient. It is bounded and
+documented rather than papered over.
+
+Three defects were found by measurement and fixed along the way:
+
+- **musl folds `libm` into `libc`**, so a musl object imports `fmod` and
+  `fesetround` with no `DT_NEEDED` at all — the mirror image of glibc's own
+  2.34 consolidation, and what actually blocked the musl case.
+- **Bundled libraries were losing to host ones** for musl guests, putting two
+  `libstdc++` and two unwinders in one process (a T4.2 violation).
+- **`dlerror()` was being swallowed**, so the "classic error message" upstream
+  intends to surface reached nobody with debug off.
 
 ## The short version
 
@@ -43,6 +69,14 @@ the symbol.** Details and the full task breakdown are in [PROMPT.md](PROMPT.md).
 | E13a | lib in `/usr/local/lib`, `--library-path` omits it, cache allowed | WORKS (found via cache) |
 | E13b | same, `--inhibit-cache` (= anylinux's patched loader) | FAILS |
 | E13c | same, cache inhibited, directory added to `--library-path` | WORKS |
+| E14 | ELF rewriter self-test (T0.4/T0.5/T0.7/T0.8) against the real code | PASSES |
+| E15 | generated shim compiles `-Wall -Werror` on the floor it targets | PASSES |
+| E16 | 42 behavioural checks on the generated shim, on glibc 2.31 | PASSES |
+| E17 | Design R: host **older** than bundled → keep bundled | PASSES |
+| E18 | Design R: host **equal** → keep bundled | PASSES |
+| E19 | `ANYLINUX_RUNTIME=bundled` override is honoured | PASSES |
+| E20 | Design R **refuses a mixed runtime set** (the E11 configuration) | PASSES |
+| E21 | control for E20: the same glibc, unmixed, is **accepted** | PASSES |
 
 ## Library discovery
 
@@ -70,12 +104,35 @@ so `RTLD_LAZY` cannot defer the problem.
 
 ```
 PROMPT.md                        full task prompt: evidence, designs, tests, tooling
-experiments/run.ps1              one-command evidence table (E1-E13)
+REPORT.md                        what was built, measured, and is still broken
+experiments/run.ps1              one-command evidence table (E1-E21)
 experiments/*.sh                 the three container stages
+src/foreign-dlopen.c             the patched loader (bundled-wins, renames, dry-run)
+src/runtime-select.c             Design R: host-runtime selection at exec time
+src/forward-shim.c               GENERATED -- do not edit; see the manifest beside it
+src/Makefile                     build, plus `make shim` to regenerate for a new floor
+tools/libc_inventory.py          symbol inventory + per-release diff
+tools/gen_forward_shim.py        the shim generator (selection generated, impls audited)
+tests/                           Tier-0 self-tests and the Tier-2/3 harnesses
+patches/sharun-library-path.patch  Design P -- hand to the user to upstream
+analysis/                        measured reports (Phase A, and the C/D verdict)
+inventories/                     symbol inventories the generator reads
 elfsym.py                        dependency-free ELF64 reader
 gap.py                           symbol-gap driver (--fetch)
 scripts/wsl-ephemeral.ps1        ephemeral WSL2 distros from any OCI image
 ```
+
+## The design, in one paragraph
+
+Split the gap by whether it is **enumerable**. Symbols that exist today and we
+lack are enumerable, so a **generated** shim covers them — generated from
+glibc's and musl's own symbol tables against a declared floor, regenerated on a
+glibc bump, with a per-symbol classification recorded in a manifest and a loud
+abort naming anything it cannot implement. Symbols invented *after* we ship are
+not enumerable and never will be, so no shim can cover them; for those the
+answer is to **stop predicting and use the host's own libc**, chosen at
+`execve` time when it is newer and provably self-consistent. Neither half is
+sufficient alone, and on a musl host only the first is available at all.
 
 ## Ephemeral distro tooling
 

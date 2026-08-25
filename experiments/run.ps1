@@ -81,9 +81,13 @@ function Invoke-Stage {
     try {
         # Out-Host, not bare invocation: anything left on the success stream would be
         # returned alongside the exit code, making the caller's `$rc` an array.
+        # /repo is the repository root: stage 3 builds src/ and tools/ from it
+        # so the fix is tested as it actually ships, not as a copy.
+        $repo = Split-Path -Parent $Here
         & $engineExe run --rm `
             -v "${VolumeName}:/work" `
             -v "${Here}:/scripts:ro" `
+            -v "${repo}:/repo:ro" `
             $Image $Shell "/scripts/$ScriptFile" 2>&1 | Out-Host
         $rc = $LASTEXITCODE
     }

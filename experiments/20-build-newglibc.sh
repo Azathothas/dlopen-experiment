@@ -40,8 +40,11 @@ done
 
 # hostrt/ = the COMPLETE matched runtime set. E11 shows a mixed set segfaults, so an
 # exec-time switch is only safe when every member comes from the same glibc.
+# "Complete" has to mean every member Design R checks for (libutil and libanl
+# included), or the completeness test refuses for the wrong reason.
 mkdir -p hostrt
-for f in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 ld-linux-x86-64.so.2; do
+for f in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libutil.so.1 \
+         libanl.so.1 libresolv.so.2 ld-linux-x86-64.so.2; do
     cp -L "/lib/x86_64-linux-gnu/$f" hostrt/ 2>/dev/null || cp -L "/lib64/$f" hostrt/ 2>/dev/null || true
 done
 

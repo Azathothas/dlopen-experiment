@@ -188,6 +188,97 @@ run E13a OK   "OK: 55" $LD --library-path "$SHARUN_LIKE" ./byname
 run E13b FAIL "cannot open shared object file" $LD --library-path "$SHARUN_LIKE" --inhibit-cache ./byname
 run E13c OK   "OK: 55" $LD --library-path "/usr/local/lib:$SHARUN_LIKE" --inhibit-cache ./byname
 
+# ===================================================================
+#  G. THE FIX -- one case per change in ../src (PROMPT.md C1)
+#
+#  Everything above measures the problem. Everything below measures a
+#  specific fix, and each one is written so it FAILS without that fix.
+# ===================================================================
+echo
+echo "-- G. the fix ---------------------------------------------------"
+
+if [ ! -f /repo/src/runtime-select.c ]; then
+    echo "  E14..E20  SKIPPED - the repo is not mounted at /repo"
+else
+    # ---- Tier 0: the ELF rewriting, tested against the REAL implementation --
+    # tests/elf-selftest.c #includes foreign-dlopen.c, so T0.4/T0.5/T0.7/T0.8
+    # exercise the shipped predicates rather than a model of them.
+    gcc -O2 -Wno-format-truncation /repo/tests/elf-selftest.c \
+        -o elf-selftest -ldl 2>/dev/null
+    run E14 OK "ELF SELFTEST PASSED" ./elf-selftest /lib/x86_64-linux-gnu/libz.so.1
+
+    # ---- Design B: the GENERATED shim ----
+    # Generated here, in the container, for THIS process's glibc 2.31 floor --
+    # so the test covers the generator, not a checked-in snapshot of its output.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 /repo/tools/gen_forward_shim.py \
+            --floor /repo/inventories/glibc-2.31.json \
+            --target /repo/inventories/glibc-2.44.json \
+            --out gen-shim.c --manifest gen-shim.json --quiet 2>/dev/null
+
+        # E15: it compiles clean against the floor it claims to target.
+        run E15 OK "compiled" sh -c \
+            'gcc -shared -fPIC -O2 -Wall -Werror gen-shim.c -o gen-shim.so 2>&1 && echo compiled'
+
+        # E16: and the implementations are CORRECT, not merely present --
+        #      ~40 documented behaviours, on a glibc that really lacks them.
+        gcc -O2 /repo/tests/shim-selftest.c -o shimtest \
+            -L"$PWD" -l:gen-shim.so -Wl,-rpath,"$PWD" >/dev/null 2>&1
+        run E16 OK "SHIM TEST PASSED" ./shimtest
+    else
+        echo "  E15    SKIPPED - no python3 in this image"
+        echo "  E16    SKIPPED - depends on E15"
+    fi
+
+    # ---- Design R: the host-runtime selector ----
+    gcc -O2 -Wno-format-truncation /repo/src/runtime-select.c \
+        -o runtime-select -ldl 2>/dev/null
+
+    # An AppDir bundling glibc 2.41 -- NEWER than this container's 2.31 host.
+    rm -rf app_new && mkdir -p app_new/lib && cp -L /work/hostrt/* app_new/lib/ 2>/dev/null
+
+    # E17: host OLDER than bundled -> keep bundled, and say why.
+    run E17 OK "is not newer than bundled" \
+        env APPDIR="$PWD/app_new" ./runtime-select --probe
+
+    # An AppDir bundling this host's own 2.31: equal, so still bundled.
+    # Bundle exactly the members hostrt stages, so "incomplete" can never be
+    # the reason a later test refuses -- E20 has to fail for the RIGHT reason.
+    rm -rf app_old && mkdir -p app_old/lib
+    for f in libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
+             libutil.so.1 libanl.so.1 libresolv.so.2; do
+        cp -L "/lib/x86_64-linux-gnu/$f" app_old/lib/ 2>/dev/null || true
+    done
+    cp -L /lib64/ld-linux-x86-64.so.2 app_old/lib/ 2>/dev/null || true
+    run E18 OK "runtime      : bundled" env APPDIR="$PWD/app_old" ./runtime-select --probe
+
+    # E19: the override is real. Forcing bundled must be honoured verbatim.
+    run E19 OK "forced by the user" \
+        env APPDIR="$PWD/app_old" ANYLINUX_RUNTIME=bundled ./runtime-select --probe
+
+    # E20: THE E11 GUARD, and the reason Design R is not just "pick the newer
+    #      one". Hand the selector a MIXED set -- 2.41's ld.so and libc beside
+    #      2.31's libdl and libpthread -- as if it were the host. E11 proved
+    #      that combination segfaults on contact, so the only right answer is
+    #      to refuse it. A selector that accepts it is worse than none.
+    # Every member present -- so "incomplete" cannot be the reason -- but
+    # libdl/libpthread/librt/libutil come from the OLD glibc.
+    rm -rf mixedhost && mkdir -p mixedhost
+    cp -L /work/hostrt/* mixedhost/ 2>/dev/null
+    for f in libdl.so.2 libpthread.so.0 librt.so.1 libutil.so.1; do
+        cp -L "/lib/x86_64-linux-gnu/$f" mixedhost/ 2>/dev/null || true
+    done
+    run E20 OK "NOT internally consistent" \
+        env APPDIR="$PWD/app_old" ./runtime-select --probe --host-dir "$PWD/mixedhost"
+
+    # E21: the control for E20. The SAME newer glibc, unmixed, must be
+    #      ACCEPTED -- otherwise E20 would pass by refusing everything, which
+    #      is not a guard, it is a broken selector.
+    rm -rf goodhost && mkdir -p goodhost && cp -L /work/hostrt/* goodhost/ 2>/dev/null
+    run E21 OK "runtime      : host" \
+        env APPDIR="$PWD/app_old" ./runtime-select --probe --host-dir "$PWD/goodhost"
+fi
+
 echo
 echo "================================================================"
 echo " predictions matched: $PASS   mismatched: $FAIL"
