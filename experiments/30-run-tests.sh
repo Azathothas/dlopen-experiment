@@ -189,7 +189,7 @@ run E13b FAIL "cannot open shared object file" $LD --library-path "$SHARUN_LIKE"
 run E13c OK   "OK: 55" $LD --library-path "/usr/local/lib:$SHARUN_LIKE" --inhibit-cache ./byname
 
 # ===================================================================
-#  G. THE FIX -- one case per change in ../src (PROMPT.md C1)
+#  G. THE FIX -- one case per change in ../src (one case per fix)
 #
 #  Everything above measures the problem. Everything below measures a
 #  specific fix, and each one is written so it FAILS without that fix.

@@ -6,7 +6,7 @@ closure import that glibc cannot provide?
 Self-contained: no third-party modules, no readelf, no dpkg, no Linux.
 Run `python3 gap.py --fetch` once to download the artifacts, then `python3 gap.py`.
 
-Reproduces section 3.1 of PROMPT.md.
+Reproduces the musl-gap measurement in REPORT.md.
 """
 import glob
 import io
@@ -147,7 +147,7 @@ def main():
     print()
     print(f"UNION OF GAP over whole musl closure: {sorted(union)}")
     print()
-    print("Expected (PROMPT.md 3.1): ['___environ', 'atexit']")
+    print("Expected: ['___environ', 'atexit']")
     print("  atexit     STRONG -> fatal under DF_BIND_NOW")
     print("  ___environ WEAK   -> resolves to 0, latent")
     return 0

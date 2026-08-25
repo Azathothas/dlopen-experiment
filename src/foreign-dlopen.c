@@ -189,7 +189,7 @@ static void fgn_free_elf(struct fgn_elf *e) {
 //
 // There is no DT_ tag for the symbol count. ld.so never needs one: it reaches
 // symbols through the hash tables. We do need one, because the ___environ
-// remap (5.2) walks the table. Two sources, in order of trust:
+// remap (Design B) walks the table. Two sources, in order of trust:
 //
 //   DT_HASH    nchain IS the symbol count, exactly. Authoritative.
 //   DT_GNU_HASH  no count; the last hashed symbol is found by walking the
@@ -558,7 +558,7 @@ static void fgn_strip_versions(struct fgn_elf *e) {
 }
 
 // ---------------------------------------------------------------------------
-// Undefined-symbol renaming (PROMPT.md 5.2, Design B)
+// Undefined-symbol renaming (Design B)
 //
 // Some musl names differ from their glibc equivalent only cosmetically. musl's
 // environ pointer is ___environ (three underscores), glibc's is __environ
@@ -929,7 +929,7 @@ static void fgn_cache_put(const char *key, void *handle) {
 }
 
 // ---------------------------------------------------------------------------
-// Unresolved-symbol reporting (PROMPT.md 5.2 dry-run, B5)
+// Unresolved-symbol reporting (Design B, dry-run mode)
 //
 // Every Mesa object is DF_BIND_NOW, so ld.so resolves the whole symbol table
 // at load: one missing symbol makes the library unloadable and the error names
@@ -938,7 +938,7 @@ static void fgn_cache_put(const char *key, void *handle) {
 // without loading anything -- which is what makes this testable with no GPU
 // and no Alpine.
 //
-// This is the generalisable half of the gconv lesson (11.1): a plugin
+// This is the generalisable half of the gconv lesson: a plugin
 // subsystem that fails loudly with the symbol named is debuggable; one that
 // "just randomly breaks" is not.
 #define FGN_REPORT_MAX 24
@@ -1032,7 +1032,7 @@ static int fgn_dryrun_enabled(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Keep the whole glibc family in the GLOBAL scope (PROMPT.md 5.2, B4)
+// Keep the whole glibc family in the GLOBAL scope (Design B, global-scope libraries)
 //
 // Stripping a version tag turns a reference into a plain name lookup. That
 // only works if the name is visible in the process's global scope, and a
@@ -1058,7 +1058,7 @@ static int fgn_dryrun_enabled(void) {
 // Nothing else guarantees it: the app's own binaries may have no reason to
 // pull libm in.
 //
-// This is rung 6 of the diagnostic ladder (9.0) applied as a policy rather
+// This is rung 6 of the diagnostic ladder applied as a policy rather
 // than per incident -- load the library instead of shimming the symbol.
 static const char *fgn_global_scope_libs[] = {
 	// musl folds these into libc.so; glibc splits them out
@@ -1141,7 +1141,7 @@ static int fgn_is_core_library(const char *path) {
 // Only $APPDIR/lib is consulted, which is where sharun's lib4bin puts the
 // collected closure. Anything reachable only through a lib.path subdirectory
 // is deliberately not searched here: this is a "does the bundle already own
-// this soname" question, not a second library-search implementation (5.5).
+// this soname" question, not a second library-search implementation (Design P).
 static int fgn_bundled_dep_path(const char *soname, char *out, size_t outsz) {
 	const char *appdir = getenv("APPDIR");
 	if (!appdir || !*appdir || !soname || !*soname)

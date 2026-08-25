@@ -1,6 +1,6 @@
 /* Tier-0 tests for the ELF rewriting in src/foreign-dlopen.c.
  *
- * Covers PROMPT.md T0.4 (round-trip), T0.5 (idempotence), T0.7 (tail-merge
+ * Covers T0.4 (round-trip), T0.5 (idempotence), T0.7 (tail-merge
  * guard) and T0.8 (malformed-input fuzz).
  *
  * It #includes the implementation rather than reimplementing the predicates,

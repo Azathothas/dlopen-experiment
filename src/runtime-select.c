@@ -1,6 +1,6 @@
 /* runtime-select -- Design R: choose the libc runtime at exec time.
  *
- * PROMPT.md 5.0. The only strategy that survives symbols invented after we
+ * Design R. The only strategy that survives symbols invented after we
  * ship (4.5, E12): if the host's glibc is newer than the one we bundle and a
  * complete matched set is present, re-exec the app under the HOST's runtime,
  * so a future symbol resolves because we are using the future libc itself.
@@ -825,7 +825,7 @@ static void rs_decide(struct rs_plan *p, const char *appdir) {
 		return;
 	}
 
-	/* --- the decision matrix (4.5) --- */
+	/* --- the decision matrix (see REPORT.md) --- */
 	if (hver <= bver && !(forced && !strcmp(forced, "host"))) {
 		snprintf(p->reason, sizeof(p->reason),
 		         "host glibc %s is not newer than bundled %s -- old host libraries "
