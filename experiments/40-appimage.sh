@@ -22,7 +22,17 @@ mkdir -p "$XDG_RUNTIME_DIR"
 PASS=0; FAIL=0; SKIP=0
 XA='-screen 0 1024x768x24 +extension GLX +extension RANDR +render' 
 
-[ -f "$LP/foreign-dlopen.upstream.so" ] || cp "$LP/foreign-dlopen.so" "$LP/foreign-dlopen.upstream.so"
+# 41-extract.sh keeps upstream's shim beside the AppDir at extraction time. If it
+# is missing, the AppDir has been used before and lib/foreign-dlopen.so is
+# whatever the last run left there -- copying that as "upstream" would quietly
+# run the entire A/B against the patched build twice and report it as a pass.
+if [ ! -f "$LP/foreign-dlopen.upstream.so" ]; then
+    echo "  FATAL: $LP/foreign-dlopen.upstream.so is missing."
+    echo "  The AppDir is stale. Delete .tmp/AppDir and re-run so extraction"
+    echo "  can preserve the shipped shim; without it the 'as shipped' cases"
+    echo "  would silently measure the patched build."
+    exit 2
+fi
 
 use_preload() {                # upstream | patched
     case "$1" in

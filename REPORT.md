@@ -618,6 +618,25 @@ Turning the feature on used to destroy a working configuration. See 3.4 for the
 second half of that, which is that it should not have been rewriting anything
 there in the first place.
 
+#### One claim retracted
+
+While reviewing this I asserted, in the issue thread, that lavapipe "has no
+libdrm on the path at all". That is false and is corrected there. Alpine's
+`libvulkan_lvp.so` links `libdrm.so.2` directly and references 35 drm symbols.
+What is true, and measured:
+
+```
+$ readelf -d /usr/lib/libvulkan_lvp.so | grep -c libdrm_amdgpu
+0
+LD_DEBUG=libs, filtered to `calling init:`   ->   /w/AppDir/lib/libdrm.so.2
+```
+
+`libdrm` is on the path and the **bundled** copy is the one loaded, which is 3.2
+working rather than libdrm being absent. `libdrm_amdgpu` -- the one that reads
+`amdgpu.ids` through `AMDGPU_ASIC_ID_TABLE_PATHS` -- genuinely is not involved,
+because lavapipe never references it. The conclusion held; the reason given for
+it did not.
+
 #### `glxgears`, the OpenGL path
 
 Runs on a glibc host (**E38**, `GL_RENDERER = llvmpipe`). **SKIPPED on Alpine**,

@@ -44,12 +44,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from elfsym import Elf  # noqa: E402
 
 
+class NoVersionInfo(Exception):
+    """The file carries no symbol versioning, so it can have no traps.
+
+    Distinguished from "no traps found" on purpose: musl legitimately has none,
+    and a --check against something that is not a versioned libc would
+    otherwise report a clean pass having examined nothing.
+    """
+
+
 def traps_for(path):
     """{name: {'default': ver|None, 'others': [...], 'addrs': {ver: addr}}}"""
     e = Elf(path)
     vs = e.versym()
     if vs is None:
-        return {}, {}
+        raise NoVersionInfo(path)
     vdi = e.verdef_index()
 
     by_name = {}
@@ -123,8 +132,27 @@ def main():
     args = ap.parse_args()
 
     merged = {}
+    examined = 0
     for p in args.libc:
-        traps, benign = traps_for(p)
+        if not os.path.exists(p):
+            print(f"error: no such file: {p}", file=sys.stderr)
+            return 2
+        try:
+            traps, benign = traps_for(p)
+        except AssertionError as exc:
+            # elfsym asserts on anything that is not an ELF64 object. Pointing
+            # this at a source file or a script should say so, not produce a
+            # traceback that looks like a bug in the audit.
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except NoVersionInfo:
+            # Not a failure by itself: musl has no symbol versions and so no
+            # traps. Say which file, so a --check that passes says what it
+            # passed on.
+            print(f"== {p}")
+            print("   no symbol versioning in this file, so no traps")
+            continue
+        examined += 1
         if not args.quiet:
             print(f"== {p}")
             print(f"   multi-version, SAME address (harmless re-versioning): {len(benign)}")
@@ -149,7 +177,18 @@ def main():
             print(f"\nwrote {args.json}: {len(merged)} trap(s)")
 
     if args.check:
+        if examined == 0:
+            print("\nFAIL: nothing with symbol versioning was examined, so this "
+                  "check proves nothing.\n      Point --check at a versioned libc.",
+                  file=sys.stderr)
+            return 2
         covered, excluded = read_coverage(args.check)
+        if not covered and not excluded:
+            print(f"\nFAIL: {args.check} declares no VC_SLOT and no VC_EXCLUDED. "
+                  "Either it is the\n      wrong file, or the macro was renamed "
+                  "and this audit has been passing on nothing.",
+                  file=sys.stderr)
+            return 2
         uncovered = sorted(set(merged) - covered - set(excluded))
         # A forwarder for something this libc does not consider a trap is not an
         # error -- an older glibc has fewer traps than the newest one, and the
