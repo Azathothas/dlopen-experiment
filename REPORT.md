@@ -12,16 +12,22 @@ Every claim is either backed by a command whose output is quoted, or labelled
 | Goal | Status |
 |---|---|
 | A host GPU driver built against a **newer glibc** loads into a process carrying an older bundled glibc | **Achieved.** Two mechanisms: the generated shim (E5) and the host-runtime switch (E12, no shim at all). The selector picks correctly on 8 of 8 distros |
-| A **musl-built** host driver loads into that same glibc process | **Loading achieved, rendering not.** All 247 libraries in Alpine's `/usr/lib`, including `libvulkan_lvp.so` and its full closure, now load, and `vkCreateInstance` against the host ICD returns `VK_SUCCESS`. `vkEnumeratePhysicalDevices` then fails inside lavapipe, past symbol resolution. `vkcube` does not render. See section 6 |
+| A **musl-built** host driver loads into that same glibc process **and renders** | **Achieved.** On Alpine 3.22, the demo AppImage's bundled glibc 2.44 drives Alpine's musl-built lavapipe: `vkEnumeratePhysicalDevices` returns one device and `vkcube` renders (E32, E37). Exactly one libc family is mapped (E35). 60 s of continuous rendering with RSS, fds and threads flat. See section 6 |
 
 | Completion criterion | Status |
 |---|---|
-| Both goals demonstrated by a test that fails before and passes after | **Partial.** Goal 1 yes. Goal 2 yes for loading (T2.2, T2.4), no for rendering (T3.2) |
-| The evidence harness still reports all predictions held | **Yes, 22/22**, up from 14/14, with 8 new cases for the fix |
+| Both goals demonstrated by a test that fails before and passes after | **Yes.** Goal 1: E5, E12. Goal 2: E22/E23 for the mechanism, E30/E32 and E37a/E37 for the end-to-end |
+| The evidence harness still reports all predictions held | **Yes, 31/31**, up from 22/22, with 9 new cases. The AppImage suite adds 11 on a glibc host and 10 on a musl host |
 | No host file modified, verified by checksum | **Yes.** T4.3, identical sha256 before and after |
 | Bundled libraries still win, verified via `dladdr` | **Yes.** T4.2, all resolved under `$APPDIR` |
-| A forward-compatibility story that does not depend on foresight | **Yes.** Host-runtime selection for the unenumerable gap, a generated shim for the enumerable one |
+| A forward-compatibility story that does not depend on foresight | **Yes.** Host-runtime selection for the unenumerable gap, a generated shim for the enumerable one, and a build-time audit (E26) for the version traps |
 | A report separating measured from assumed | this document |
+
+The one thing this report previously got wrong is worth stating plainly, because
+it was the central claim: **the rendering failure was blamed on glibc-vs-musl
+ABI differences, and it was not that.** Removing an object's symbol version
+requirements is by itself enough to break it, on one libc, with no musl and no
+Vulkan anywhere in the process. Section 6.2 is the measurement.
 
 ---
 
@@ -64,7 +70,7 @@ $ vulkaninfo --summary        # Alpine 3.22, native musl
 
 ---
 
-## 3. Three defects found by measurement
+## 3. Six defects found by measurement
 
 None of these were in the problem statement. Each was found by running
 something, and each is fixed.
@@ -136,6 +142,79 @@ know how to read". It does the opposite.
 
 **Fix:** read `dlerror()` only when tracing is on, so the message survives for
 the caller in the normal case.
+
+### 3.4 Everything was being rewritten, whether or not it needed to be
+
+`fgn_scan_providers()` built its idea of "versions we can satisfy" from
+`dlsym("malloc")` -> `dladdr` -> parse that one file. So it only ever learned
+**libc's** version names. Every `GLIBCXX_*`, `CXXABI_*` and `LLVM_*` requirement
+in a Mesa closure was therefore unvouchable, `fgn_requirements_satisfied()`
+returned 0 for all of them, and objects that needed nothing were rewritten
+anyway. Reported independently in issue #1, from a Gentoo host whose glibc is
+*older* than the bundled one, where the debug line says it outright:
+
+```
+foreign: our libc provides 46 known versions
+```
+
+A `DT_VERNEED` record names a **file** and the versions wanted **from it**, so
+that is the question to ask: resolve the file (bundled copy first, then whatever
+is already loaded under that soname) and look in *its* `DT_VERDEF`.
+
+The check also had to move. It ran before the dependency closure was walked, and
+half the files a `DT_VERNEED` names are the object's own dependencies, none of
+them loaded yet — so the precise version of the question would have answered
+"absent" for every one and stripped everything regardless.
+
+Measured on `debian:trixie-slim`, host glibc 2.41 under a bundled 2.44:
+
+| | objects rewritten | `/tmp` copies | result |
+|---|---|---|---|
+| as shipped | 6 | 6 | `enumerate -> -1` |
+| after 3.4 | **0** | **0** | 1 device, llvmpipe |
+
+Zero is the right answer there, and it also silences the Vulkan loader's
+"path to given binary differs from OS loaded path" warning, because there is no
+longer a rewritten copy for it to notice. On Alpine 5 objects are still
+rewritten, which is unavoidable: they are musl-built. **E39** pins the count,
+because a fix that merely stopped mattering would pass every other case.
+
+### 3.5 The failure report accused the wrong thing
+
+When a `DT_NEEDED` cannot be opened, every symbol it would have provided looks
+unresolved. The report listed them and ended with:
+
+```
+Most likely the bundled glibc predates them. ANYLINUX_RUNTIME=host
+runs against the host's own libc, which will have them.
+```
+
+under 258 LLVM entry points. No libc has ever exported any of them, and
+`ANYLINUX_RUNTIME=host` cannot help. Found in issue #1 on a host that keeps
+LLVM in `/usr/lib/llvm/22/lib64`, reachable only through `/etc/ld.so.cache`,
+which a bundled `ld.so` patched to a private cache path does not read.
+
+**Fix:** record which dependencies could not be opened and name them; offer the
+glibc guess only when at least one unresolved symbol is shaped like something a
+libc could own — not `_Z`-mangled, not `LLVM*`. **E28**.
+
+### 3.6 The failure report was itself destructive
+
+Found while testing 3.5, and the same class of bug as 3.3 reached from the other
+side. `fgn_report_unresolved()` probes with `dlsym`, and **every probe that
+misses replaces the pending `dlerror()` message**. The caller, about to ask for
+it, was handed
+
+```
+/work/foreign-dlopen.so: undefined symbol: _ZN4llvm9Attribute16getWithAlignmentEv
+```
+
+— this object blamed for a failure in a different one — instead of ld.so's
+actual `libvendor.so.1: cannot open shared object file`. The code carries a
+comment saying it makes no `dlerror()` call, which was true and not enough.
+
+**Fix:** re-run the load after the report, which puts the real message back.
+One extra failed `dlopen`, only in a trace run. **E29**.
 
 ---
 
@@ -369,7 +448,7 @@ that it does refuse.
 
 ---
 
-## 6. Goal 2: what works, and exactly where it stops
+## 6. Goal 2: what works, and how the last blocker fell
 
 ### 6.1 What works
 
@@ -398,7 +477,9 @@ libraries in Alpine's `/usr/lib` loads into the glibc process, up from 2, with
 zero regressions. Through the bundled Vulkan loader, `vkCreateInstance` against
 the host ICD returns `VK_SUCCESS`.
 
-### 6.2 Where it stops: T3.2 fails
+### 6.2 T3.2, solved: an unversioned reference does not get the default definition
+
+This was the open failure:
 
 ```
 [Vulkan Loader] ERROR: setup_loader_term_phys_devs: Call to
@@ -407,36 +488,143 @@ the host ICD returns `VK_SUCCESS`.
 vkEnumeratePhysicalDevices reported zero accessible devices.
 ```
 
-`vkcube` does not render on Alpine. This is the "loads but misbehaves" rung:
-symbol availability is necessary but not sufficient.
+It was attributed to glibc-vs-musl ABI differences. **It is not that**, and the
+first measurement that mattered was reproducing it with no musl in sight.
 
-Ruled out by measurement, not by reasoning:
+#### The reproduction that broke it open
 
-| Hypothesis | Test | Result |
+`debian:trixie-slim`, one libc, glibc 2.41 throughout. Debian's own
+`libvulkan_lvp.so` is a glibc object. The only change from the working case is
+that foreign-dlopen intercepts the load, and the only reason it intercepts is
+that the ICD manifest was given an absolute `library_path` (Debian ships a bare
+soname, which foreign-dlopen deliberately never touches, which is why nobody had
+seen this on Debian):
+
+```
+=== feature OFF ===  deviceName = llvmpipe (LLVM 19.1.7, 256 bits)
+=== feature ON  ===  WARNING: [lvp_device.c:1315] Code 0 : VK_ERROR_OUT_OF_HOST_MEMORY
+                     ERROR: setup_loader_term_phys_devs ... VK_ERROR_OUT_OF_HOST_MEMORY
+```
+
+Same libc on both sides. So the ABI hypothesis is dead, and the mechanism is
+the rewriting itself.
+
+#### The chain, one measurement per link
+
+Debian ships Mesa's `__FILE__` strings, so the failure names its own line.
+
+| Link | How | Result |
 |---|---|---|
-| Missing symbols | dry-run over the whole ICD closure | **zero** unresolvable strong imports |
-| A real allocation failure | interposed `malloc`, `calloc`, `realloc`, `posix_memalign`, `aligned_alloc` | **0 NULL returns**, so the error code is a stand-in |
-| The `___environ` rename | A/B with `ANYLINUX_LIB_FOREIGN_NORENAME=1` | byte-identical failure, exonerated |
-| Duplicate `libstdc++` and `libgcc_s` | provenance check | was real, fixed in 3.2, failure persists |
-| `issetugid` | added to the shim | corpus 243 to 247, failure persists |
-| Display or WSI, not libc | run under `xvfb-run -a`, the error is a device error | not the cause |
-| Host driver broken | `vulkaninfo --summary` natively on Alpine | lavapipe healthy |
+| which Mesa call fails | the message itself | `lvp_device.c:1315` = `lvp_init_wsi()` |
+| which WSI backend | gdb `FinishBreakpoint` on each `wsi_*_init_wsi` | `wsi_display_init_wsi` -> `VK_ERROR_OUT_OF_HOST_MEMORY`; x11 and wayland both `VK_SUCCESS` |
+| which line inside it | gdb, stepping by line, both runs side by side | diverges at `wsi_common_display.c:2323`, `u_cnd_monotonic_init()` returns `thrd_error` where the working run returns 0 |
+| which libc call | breakpoints on the three calls that inlines to | `pthread_condattr_init` 0, `pthread_condattr_setclock` 0, **`pthread_cond_init` 22 = `EINVAL`** |
+| *which* `pthread_cond_init` | `info symbol $pc` at the breakpoint | failing run enters libc+`0x909f0`, working run libc+`0x91b00` |
 
-Narrowed to this: both paths are **byte-identical in `strace` up to and
-including the two `sysinfo` calls** in lavapipe's device init. The working musl
-path then continues to `/proc/meminfo`; the glibc path makes **no further
-syscalls at all** and returns the error. The divergence is a pure userspace
-decision inside Mesa, after the memory queries and before any allocation.
+```
+$ nm -D /lib/x86_64-linux-gnu/libc.so.6 | grep -w pthread_cond_init
+00000000000909f0 T pthread_cond_init@GLIBC_2.2.5     <- the failing run lands here
+0000000000091b00 T pthread_cond_init@@GLIBC_2.3.2    <- the working run lands here
+```
 
-Progress is real and measurable: with the **stock upstream** preload the same
-probe **segfaults**. With this work it reaches `VK_SUCCESS` on instance creation
-and returns a clean, diagnosable error. That is a strict improvement, but it is
-not the goal, and it is reported as a failure.
+`pthread_cond_init@GLIBC_2.2.5` is `__pthread_cond_init_2_0`, kept for binaries
+from before the 2003 condition-variable ABI change. Its entire body is
+`if (cond_attr != NULL) return EINVAL;`. Mesa always passes an attribute,
+because a monotonic clock is the only reason to build one.
 
-`glxgears` (T3.3) was not separately diagnosed. It shares the ICD and DRI
-loading path and the same blocker.
+#### Stated as a property of libc alone
 
-Next steps are in [CONTINUE.md](CONTINUE.md) section 4.
+E22 and E22b, no Vulkan, no musl, no AppImage — one small object, built once,
+then version-stripped exactly the way a host driver is:
+
+```
+  E22    versions stripped   probe_cond_init() = 22
+  E22b   versions intact     probe_cond_init() = 0
+```
+
+**An unversioned reference does not get the default definition of a symbol.**
+A stripped object has only unversioned references. So does every musl-built
+object, which never had version information to begin with — which is why the
+same failure appeared on Alpine and on Gentoo with a glibc driver, and why it
+looked like an ABI problem for as long as it did.
+
+#### The fix
+
+[`src/version-compat.c`](src/version-compat.c) defines the trapped names itself.
+The preload is ahead of libc in the global lookup scope, so every unversioned
+reference in the process lands there, and each definition forwards to the
+default one.
+
+Finding "the default one" is the part that needed care. `dlsym` is not an
+answer: measured in **E27**, `dlsym(RTLD_NEXT, "pthread_cond_init")` returns the
+**obsolete** definition on glibc 2.31 and the default one on 2.41. So the
+version name is read out of the defining object's own `.gnu.version_d` — the
+entry whose versym lacks the hidden bit — and handed to `dlvsym`, which is
+correct on both. No version string is hardcoded anywhere.
+
+Which names to cover is not a judgement call either.
+[`tools/version_traps.py`](tools/version_traps.py) computes the set from a libc:
+a name defined at two or more versions whose `st_value` **differs**. Same
+address at several versions is re-versioning, not an ABI change — the glibc 2.34
+libpthread merge does that to 191 symbols and none of them can matter.
+
+```
+glibc 2.41  multi-version, same address (harmless): 191    different address (traps): 33
+glibc 2.31  multi-version, same address (harmless):  10    different address (traps): 21
+```
+
+`make traps` fails the build if a libc has a trap `version-compat.c` neither
+forwards nor explicitly declines, so a future glibc cannot introduce one
+silently (**E26**). Three are declined on purpose, with reasons: `memcpy`
+(both definitions satisfy the memcpy contract, checked byte-for-byte over 4096
+size and alignment combinations in **E25**; interposing every memcpy in a
+rendering process to fix nothing is not a trade worth making) and
+`sys_nerr`/`_sys_nerr` (data objects, which a forwarder cannot alias, and from
+glibc 2.32 neither has a default version at all, so an unversioned reference
+fails loudly instead of quietly).
+
+#### End to end
+
+`alpine:3.22`, musl host, the demo AppImage bundling glibc 2.44, forced onto
+Alpine's own musl-built lavapipe:
+
+| | as shipped | feature off | **this repo, feature on** |
+|---|---|---|---|
+| `vkprobe` | segfault | `VK_ERROR_INCOMPATIBLE_DRIVER` | **1 device, llvmpipe** |
+| host `/usr/lib` loadable | — | 2 / 177 | **177 / 177** |
+| libc families mapped | — | — | **one** |
+| `vkcube` | `reported zero accessible devices` | — | **`Selected GPU 0: llvmpipe (LLVM 20.1.8)`** |
+| 100 load/unload cycles | — | — | **rss +68 kB, fds +0, copies +0** |
+| 60 s continuous render | — | — | **rss/fds/threads flat at 6 s, 33 s, 60 s** |
+
+The `feature off` column is why the rest of the table means anything: the same
+command with the same binaries cannot use the host driver at all.
+
+#### What this also fixed
+
+The same defect ran the other way on a **glibc** host. Reported independently in
+[issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1) on Gentoo
+with a real `radv`, and reproduced here on `debian:trixie-slim`, whose glibc
+2.41 is **older** than the bundled 2.44 — so by construction nothing can be
+missing and nothing needs rewriting:
+
+| | vkcube |
+|---|---|
+| as shipped, feature on | `vkEnumeratePhysicalDevices reported zero accessible devices` |
+| feature off | renders |
+| this repo, feature on | renders |
+
+Turning the feature on used to destroy a working configuration. See 3.4 for the
+second half of that, which is that it should not have been rewriting anything
+there in the first place.
+
+#### `glxgears`, the OpenGL path
+
+Runs on a glibc host (**E38**, `GL_RENDERER = llvmpipe`). **SKIPPED on Alpine**,
+with the specific missing capability: Alpine's `mesa-gl` is classic Mesa, not
+libglvnd, so there is no `libGLX_<vendor>.so.0` for the AppImage's bundled
+libglvnd to `dlopen`. That is host packaging, not libc, and no loader shim can
+supply a file the distribution does not ship.
 
 ---
 
@@ -466,10 +654,34 @@ wrong.
 
 ### Tier 1, the evidence table
 
-`experiments/run.ps1` reports **22/22 predictions held**. E1 through E13 are
-unchanged. E14 through E21 are new, one per fix: the ELF self-test, the
-generated-shim compile, the generated-shim behaviour, and five selector
-decisions including the mixed-set guard and its control.
+`experiments/run.ps1` reports **31/31 predictions held**. E1 through E13
+measure the problem. E14 through E21 are one per fix from the first pass: the
+ELF self-test, the generated-shim compile and behaviour, and five selector
+decisions including the mixed-set guard and its control. E22 through E29 are
+the version-binding trap and the reporting defects:
+
+| ID | What it pins |
+|---|---|
+| E22 | the bug, stated in libc alone: version-stripped object, `pthread_cond_init` returns `EINVAL` |
+| E22b | its control: the same object unstripped returns 0, so the probe and the container are exonerated |
+| E23 | the fix: the same stripped object with the preload merely present returns 0 |
+| E24 | the obsolete definition really does reject the attribute Mesa passes |
+| E25 | the `memcpy` exclusion is justified: 4096 size/alignment combinations, byte-identical |
+| E27 | which resolution primitive may be trusted; `dlsym(RTLD_NEXT)` is not one |
+| E26 | the audit: no glibc may add a trap `version-compat.c` neither forwards nor declines |
+| E28 | the report names the dependency that failed to open, instead of accusing the libc |
+| E29 | and the caller still gets ld.so's message, not one of the report's own `dlsym` misses |
+
+### Tier 1b, the AppImage end-to-end suite
+
+`experiments/appimage.ps1` runs a real AppImage against a real host driver on
+two hosts and reports **11/11 on glibc** and **10/10 with one skip on musl**.
+It fetches the demo AppImage once (sha256 verified), extracts it in a container
+because the payload is DwarFS, builds `src/` on the glibc 2.31 floor, and then
+measures E30 through E39 on each host. Every case is run with the feature off
+and on, and against both the shipped `foreign-dlopen.so` and the one built from
+`src/`, because a one-sided result cannot tell a working fix from a fallback
+that was already happening.
 
 ### Tier 2, 3 and 4
 
@@ -478,18 +690,19 @@ decisions including the mixed-set guard and its control.
 | T2.1 | Alpine native lavapipe baseline | **PASS**, named by `vulkaninfo` |
 | T2.2 | foreign-load the real ICD | **PASS** |
 | T2.3 | rewritten once, cached, no musl libc load | **PASS** |
-| T2.4 | corpus, zero regressions | **PASS.** 2/247 to 247/247, 0 regressions |
+| T2.4 | corpus, zero regressions | **PASS.** 2/247 to 247/247, 0 regressions. Re-measured by E33/E34 on a leaner Alpine image: 2/177 to 177/177. The denominator is however many `.so` files the image happens to have; the ratio is the result |
 | T2.5 | selector across the distro matrix | **PASS** |
 | T2.6 | forced `ANYLINUX_RUNTIME=bundled` on a newer host | **PASS** (E19) |
 | T2.7 | cache-only library found via `--library-path` | **PASS** (E13c) |
 | T3.1 | Alpine baseline fails before the fix | **PASS with a caveat**, below |
-| T3.2 | `vkcube` with the host driver | **FAIL**, section 6 |
-| T3.3 | `glxgears` | **FAIL**, same blocker |
+| T3.2 | `vkcube` with the host driver | **PASS.** `Selected GPU 0: llvmpipe (LLVM 20.1.8)` on Alpine, feature on; `reported zero accessible devices` as shipped. Section 6.2 |
+| T3.3 | `glxgears` | **PASS** on a glibc host (E38). **SKIPPED** on Alpine: its Mesa is not libglvnd, see the skipped list |
 | T3.4 | driver provenance is the host's | **PASS**, below |
-| T4.1 | exactly one libc family | **PASS.** glibc yes, musl no |
+| T4.1 | exactly one libc family | **PASS.** glibc mapped, musl not, with the feature on (E35) |
 | T4.2 | bundled wins, via `dladdr` | **PASS** |
 | T4.3 | no host file modified | **PASS.** Identical sha256 over `/usr/lib`, `/lib`, `/etc/ld.so.conf.d` |
-| T4.4 | no regression on glibc hosts | **PASS**, below |
+| T4.4 | no regression on glibc hosts | **PASS**, below, and E30-E39 on `debian:trixie-slim` |
+| T4.5 | 100 load/unload cycles, and 60 s of continuous rendering | **PASS.** Cycles: rss +68 kB, fds +0, rewritten images +0 over 99 steady-state cycles (E36). 60 s: rss 157656 kB, 5 fds, 48 threads, identical at t=6 s, 33 s and 60 s |
 
 **T3.1 caveat.** Its condition is "fails with a *symbol-resolution* error, not a
 display error". At the AppImage level, under `xvfb-run -a`, the message is
@@ -556,15 +769,19 @@ T1.6  SKIPPED - pthread_mutex_t and cond_t sharing under TSan not written.
 T1.7  SKIPPED - Solo's dev/abi_probe.c was not ported, so the glibc-vs-musl
       struct-size divergences (regmatch_t 8 vs 16, rusage 144 vs 272,
       sched_param 4 vs 48, ucontext_t 968 vs 936, the FTW_* constants,
-      O_LARGEFILE) were NOT proven unused by the closure. This is the single
-      most likely home of the T3.2 failure and is the first thing to do next.
-      See CONTINUE.md section 4.
+      O_LARGEFILE) are still NOT proven unused by the closure. This was
+      previously called "the single most likely home of the T3.2 failure".
+      It was not: 6.2 found T3.2 elsewhere and fixed it, and vkcube now
+      renders with those divergences untested. They remain a real hazard for
+      code paths this workload does not reach, so this stays SKIPPED rather
+      than being quietly dropped -- but it is no longer the top of the list.
 
-T4.5  SKIPPED - 100 load/unload cycles and a 60 s vkcube run were not
-      performed, because vkcube does not render (T3.2). RSS stability, fd
-      leaks and .anylinux-fgn-* accumulation are UNVERIFIED. Partial
-      evidence: T2.3 confirms each object is rewritten exactly once and
-      cached, and T4.3 confirms the runtime dir is cleaned.
+T3.3  SKIPPED on Alpine - glxgears cannot run there for a reason that is not
+      libc: Alpine's mesa-gl is classic Mesa, not libglvnd, so no
+      libGLX_<vendor>.so.0 exists for the AppImage's bundled libglvnd to
+      dlopen. PASSES on a glibc host with libglvnd (E38,
+      GL_RENDERER = llvmpipe). No loader shim can supply a file the
+      distribution does not ship.
 
 T5.1  SKIPPED - no discrete GPU in the test environment.
       Nearest evidence: T2.2 and T2.4 pass with lavapipe (software Vulkan),
@@ -583,7 +800,8 @@ T5.3  SKIPPED - no aarch64 hardware. The code is arch-parameterised
 ## 8. Measured versus assumed
 
 **Measured:** every table and quoted output above, plus `experiments/run.ps1`
-(22/22), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
+(31/31), `experiments/appimage.ps1` (11/11 glibc, 10/10 musl with one named
+skip), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
 the corpus test, and the compiled-and-run sharun patch.
 
 **Assumed or UNVERIFIED:**
@@ -627,13 +845,19 @@ sonames.
 
 ## 10. Residual risk
 
-1. **T3.2 is unexplained.** A load that succeeds can still be semantically
-   wrong, and here it is. The failure is bounded (section 6) but not diagnosed.
-2. **The glibc-vs-musl hazard list is unexercised** (T1.7). `regmatch_t`,
+1. **The version-trap set is per-libc and computed, not universal.**
+   `version-compat.c` covers what `tools/version_traps.py` finds in the libc it
+   is audited against. A glibc that adds a trap after this was built is caught
+   by `make traps` (E26) only if someone runs it. The audit is a build target,
+   not an automatic gate, and nothing regenerates it on a bundled-glibc bump.
+   Same class as risk 6.
+2. **The glibc-vs-musl hazard list is still unexercised** (T1.7). `regmatch_t`,
    `rusage`, `sched_param`, `ucontext_t`, the `FTW_*` constants and
    `O_LARGEFILE` all differ, and nothing here proves the loaded closure avoids
-   them. Given T3.2 fails inside a musl-built driver with no missing symbols,
-   this is the most probable cause.
+   them. This was previously called the most probable cause of T3.2; it was not,
+   and vkcube now renders with every one of them untested. That makes the list
+   *less* urgent and no less real: a code path this workload does not reach can
+   still hit any of them.
 3. **Switching to the host runtime abandons the bundle-everything guarantee.**
    Real, deliberate, surfaced and overridable, but real.
 4. **The generated shim is bounded by construction.** It covers what existed
@@ -650,3 +874,23 @@ sonames.
    regenerating `forward-shim.c`, the shim would interpose over symbols libc now
    provides. The manifest records the floor and `make shim` regenerates, but
    nothing enforces regeneration at build time.
+7. **The forwarders are process-wide.** A bundled library's own
+   `pthread_cond_init@GLIBC_2.3.2` reference also lands in `version-compat.c`,
+   because glibc lets an unversioned definition satisfy a versioned reference --
+   that is how `LD_PRELOAD` interposition has always worked. It then forwards to
+   the same default definition it would have reached directly, so behaviour is
+   unchanged and the cost is one indirect call. The case this would get wrong is
+   an object that genuinely wants an obsolete version: glibc 2.2.5-era condition
+   variables, 2003 or earlier. Nothing that ships in an AppImage does, and
+   nothing was found that does, but this is an assumption rather than a
+   measurement.
+8. **On a musl host, "the feature off" is not a safe fallback.** Measured under
+   the demo AppImage's own AppRun on Alpine: with `ANYLINUX_LIB_FOREIGN_DLOPEN=0`
+   and a search path that reaches `/lib`, the bundled glibc `ld.so` finds
+   `libc.musl-x86_64.so.1`, loads it, and the process ends up with **two libc
+   families initialised** (`calling init:` names both). It renders, which is
+   worse than failing, because rule 3 of the design says exactly one libc family
+   may ever be in a process and E8/E9 measure why. With the feature on, only
+   glibc is initialised (E35). This is upstream behaviour, not something this
+   work introduced, and it is not fixed here -- it is recorded because "it
+   worked with the feature off" is not the reassurance it looks like.

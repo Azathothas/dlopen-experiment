@@ -23,6 +23,11 @@ so their symbol version requirements stop mattering.
 
 The patched version lives in [`src/foreign-dlopen.c`](src/foreign-dlopen.c).
 
+**The state as of this handover: it works.** On Alpine, the demo AppImage's
+bundled glibc 2.44 drives Alpine's own musl-built Mesa, `vkcube` renders, and
+exactly one libc family is in the process. Section 3.3 reproduces that in one
+command. Section 4 is what is left.
+
 ## 2. Environment
 
 Everything runs in throwaway containers. No GPU is needed for any mandatory
@@ -45,6 +50,9 @@ mangles the container-side path:
 MSYS_NO_PATHCONV=1 "$PODMAN" run --rm -v "$PWD:/repo:ro" alpine:3.22 sh -c '...'
 ```
 
+`.tmp/` is gitignored scratch. `appimage.ps1` caches the demo AppImage and the
+extracted AppDir there, so the second run is much faster than the first.
+
 ## 3. Reproduce the current state
 
 ### 3.1 The evidence table (3 minutes, the regression gate)
@@ -53,14 +61,14 @@ MSYS_NO_PATHCONV=1 "$PODMAN" run --rm -v "$PWD:/repo:ro" alpine:3.22 sh -c '...'
 .\experiments\run.ps1
 ```
 
-Expect **22/22 predictions held**. Run this before every commit. A MISMATCH is
+Expect **31/31 predictions held**. Run this before every commit. A MISMATCH is
 a finding, not a harness bug: investigate before coding.
 
 Three container stages over one shared volume: `alpine:3.22` builds a faithful
 musl probe, `debian:trixie-slim` (glibc 2.41) builds libraries needing new
 symbols, `debian:bullseye-slim` (glibc 2.31) plays "an AppImage bundling an
 older glibc" and runs the tests. The repo is mounted at `/repo`, so cases
-E14-E21 build and test `src/` as it actually ships.
+E14-E29 build and test `src/` as it actually ships.
 
 ### 3.2 The musl symbol gap (Tier 0, no Linux needed)
 
@@ -72,44 +80,56 @@ PYTHONPATH=<repo> py -3 <repo>/gap.py --fetch
 Expect the union over the Mesa+LLVM closure to be exactly
 `['___environ', 'atexit']`.
 
-### 3.3 The Alpine end-to-end suite
+### 3.3 The end-to-end proof (10 minutes the first time)
 
-This needs the demo AppImage, which is not in the repo:
-
-```bash
-curl -sSL -o demo.AppImage \
-  "https://github.com/Samueru-sama/Anylinux-AppImages/releases/download/demo/vkcube+glxgears-host-drivers-demo-x86_64.AppImage"
-# sha256 712766f8a4dc6b5ea3193ed7bb0282b64c7b781f7334056416edd3d00e8960bd
+```powershell
+.\experiments\appimage.ps1
 ```
 
-Extract it **inside a container** (the embedded filesystem is DwarFS, and
-`--appimage-extract` runs the ELF runtime):
+Expect **11/11 on the glibc host** and **10/10 with one named skip on musl**.
+It downloads the demo AppImage once into `.tmp` (sha256 verified), extracts it
+inside a container because the payload is DwarFS, builds `src/` on the glibc
+2.31 **floor**, and then runs the same suite on `alpine:3.22` and
+`debian:trixie-slim`.
 
-```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./demo.AppImage --appimage-extract
-# produces ./squashfs-root -> ./AppDir
+Every case runs the feature **off and on**, and against **both** the
+`foreign-dlopen.so` shipped inside the AppImage and the one built from `src/`.
+That is not thoroughness for its own sake: see section 6, where "it rendered
+with the feature off" turns out not to mean what it looks like.
+
+The headline rows, on Alpine:
+
+```
+E30  AppImage as shipped, feature on   NO-DEVICES  (segfault)
+E31  control, feature off              NO-DEVICES  (VK_ERROR_INCOMPATIBLE_DRIVER)
+E32  this repo, feature on             DEVICES     (llvmpipe)
+E37a AppImage as shipped, vkcube       reported zero accessible devices
+E37  this repo, vkcube                 Selected GPU 0: llvmpipe (LLVM 20.1.8)
 ```
 
-Then build the preload on **bullseye** (glibc 2.31) so it only needs old
-symbols, drop it into the AppDir, and run against Alpine:
+### 3.4 Driving it by hand
+
+The suite is the reproducible form, but when you are debugging you want the
+pieces. Build the preload on **bullseye** so it only needs old symbols, drop it
+into the AppDir, and run against Alpine:
 
 ```bash
 # in debian:bullseye-slim, with the repo mounted
-cd src && make                      # produces foreign-dlopen.so
+cd src && make                      # foreign-dlopen.so + runtime-select
 
 # in alpine:3.22, with AppDir and the built .so mounted
-apk add --no-cache mesa-vulkan-swrast vulkan-tools
+apk add --no-cache mesa-vulkan-swrast vulkan-tools vulkan-loader
 export APPDIR=/w/AppDir XDG_RUNTIME_DIR=/tmp/xdg
 export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 mkdir -p $XDG_RUNTIME_DIR
 
 # A/B: the same command, feature off then on. Never trust a single-sided run.
 ANYLINUX_LIB_FOREIGN_DLOPEN=0 \
-  "$APPDIR/lib/ld-linux-x86-64.so.2" --library-path "$APPDIR/lib" ./harness /usr/lib/libvulkan_lvp.so
+  "$APPDIR/lib/ld-linux-x86-64.so.2" --library-path "$APPDIR/lib" ./vkprobe
 
 ANYLINUX_LIB_FOREIGN_DLOPEN=1 \
   "$APPDIR/lib/ld-linux-x86-64.so.2" --library-path "$APPDIR/lib" \
-  --preload "$APPDIR/lib/foreign-dlopen.so" ./harness /usr/lib/libvulkan_lvp.so
+  --preload "$APPDIR/lib/foreign-dlopen.so" ./vkprobe
 ```
 
 > Use `ld.so --preload` rather than `LD_PRELOAD` when a musl binary is anywhere
@@ -124,112 +144,129 @@ Test programs, all built on a glibc host and run under the bundled loader:
 | [`tests/vkprobe.c`](tests/vkprobe.c) | bundled Vulkan loader plus host ICD, `vkCreateInstance` then `vkEnumeratePhysicalDevices`, no window system |
 | [`tests/corpus.c`](tests/corpus.c) | `dlopen` every `.so` in a directory, print OK/FAIL with the reason |
 | [`tests/invariants.c`](tests/invariants.c) | one libc family in `/proc/self/maps`, bundled sonames win |
-| [`tests/allocprobe.c`](tests/allocprobe.c) | interpose the allocator family, report every NULL return |
+| [`tests/soak.c`](tests/soak.c) | N load/unload cycles with RSS, fd and rewritten-copy counts |
+| [`tests/verprobe.c`](tests/verprobe.c) | the version-binding trap as a loadable probe: returns 0 or 22 |
+| [`tests/vertrap.c`](tests/vertrap.c) | the three libc properties `version-compat.c` rests on |
+| [`tests/allocprobe.c`](tests/allocprobe.c) | interpose the allocator family; every counter carries its total |
 
-## 4. The one thing that does not work
+## 4. What was blocking it, and what is left
 
-**`vkcube` does not render on Alpine.** This is the remaining goal.
+### 4.1 The blocker, now fixed
 
-Everything up to rendering works:
+`vkEnumeratePhysicalDevices` returned `VK_ERROR_OUT_OF_HOST_MEMORY` with zero
+devices. This was attributed to glibc-vs-musl ABI differences. **It was not
+that.**
+
+The measurement that broke it open was reproducing the failure on
+`debian:trixie-slim` with **one libc**: Debian's own glibc-built
+`libvulkan_lvp.so`, glibc 2.41 on both sides, no musl anywhere. Then the chain
+fell out in an afternoon, because Debian ships Mesa's `__FILE__` strings and
+`mesa-vulkan-drivers-dbgsym` exists:
 
 ```
-vkCreateInstance          : 0 (VK_SUCCESS)
-vkEnumeratePhysicalDevices: -1, count=0
+lvp_device.c:1315            lvp_init_wsi() failed
+wsi_display_init_wsi()       -> VK_ERROR_OUT_OF_HOST_MEMORY
+wsi_common_display.c:2323    u_cnd_monotonic_init() -> thrd_error
+                             pthread_cond_init() -> 22 (EINVAL)
+gdb, info symbol $pc         libc+0x909f0 = pthread_cond_init@GLIBC_2.2.5
+                             (the working run: libc+0x91b00 = @@GLIBC_2.3.2)
 ```
 
-`-1` is `VK_ERROR_OUT_OF_HOST_MEMORY`, returned by lavapipe from inside
-`vkEnumeratePhysicalDevices`. The failure is **past symbol resolution**.
+`pthread_cond_init@GLIBC_2.2.5` is the pre-2003 compat definition and its whole
+body is `if (cond_attr != NULL) return EINVAL;`.
 
-### Already ruled out, by measurement
+**An unversioned reference does not get the default definition of a symbol.**
+A version-stripped object has only unversioned references. So does every
+musl-built object, which never had version information at all. That is why the
+same failure showed up on Alpine, on Gentoo with a glibc `radv`, and on Debian
+once the ICD manifest named an absolute path.
 
-| Hypothesis | How it was tested | Result |
+The fix is [`src/version-compat.c`](src/version-compat.c) plus
+[`tools/version_traps.py`](tools/version_traps.py); REPORT.md 6.2 has the whole
+chain with the commands.
+
+### 4.2 What is genuinely left
+
+| Item | Why it is not done | Effort |
 |---|---|---|
-| Missing symbols | `ANYLINUX_LIB_FOREIGN_DRYRUN=1` over the whole ICD closure | zero unresolvable strong imports |
-| A real allocation failure | [`tests/allocprobe.c`](tests/allocprobe.c) interposing `malloc`/`calloc`/`realloc`/`posix_memalign`/`aligned_alloc` | **0 NULL returns**, so the error code is a stand-in |
-| The `___environ` rename | A/B with `ANYLINUX_LIB_FOREIGN_NORENAME=1` | byte-identical failure |
-| Duplicate `libstdc++`/`libgcc_s` | [`tests/invariants.c`](tests/invariants.c) provenance check | was real, is fixed, failure persists |
-| `issetugid` missing | added to the shim | corpus went 243 to 247, failure persists |
-| Display or WSI, not libc | run under `xvfb-run -a`; the error is a device error | not the cause |
-| Host driver broken | `vulkaninfo --summary` natively on Alpine | lavapipe healthy |
-
-### The strongest lead
-
-`strace` shows the working musl path and the failing glibc path are
-**byte-identical up to and including the two `sysinfo` calls** in lavapipe's
-device init. The musl path then continues to `/proc/meminfo`; the glibc path
-makes **no further syscalls at all** and returns the error. The divergence is a
-pure userspace decision inside Mesa, after the memory queries and before any
-allocation.
-
-Capture it like this:
-
-```bash
-# needs --cap-add SYS_PTRACE --security-opt seccomp=unconfined
-apk add --no-cache strace
-strace -f -o /tmp/glibc.log "$APPDIR/lib/ld-linux-x86-64.so.2" \
-  --library-path "$APPDIR/lib" --preload "$APPDIR/lib/foreign-dlopen.so" ./vkprobe
-strace -f -o /tmp/musl.log vulkaninfo --summary      # the working reference
-```
-
-### What to try next, in order
-
-1. **Port Solo's `dev/abi_probe.c`** and run it over the loaded closure. This is
-   the highest-value remaining test and the most probable cause. The
-   glibc-vs-musl divergences that matter on x86-64:
-
-   | Probe | glibc | musl | Risk |
-   |---|---|---|---|
-   | `regmatch_t` size | 8 | **16** | index corruption |
-   | `struct rusage` | 144 | **272** | overrun |
-   | `struct sched_param` | 4 | **48** | overrun on write |
-   | `ucontext_t` | 968 | **936** | overrun on write |
-   | `FTW_F`/`FTW_D`/`FTW_SL`/`FTW_NS` | 0/1/4/3 | 1/2/5/4 | **silently wrong branch** |
-   | `HOST_NAME_MAX` / `NI_MAXHOST` | 64 / 1025 | 255 / 255 | truncation |
-   | `O_LARGEFILE` | 0 | 32768 | flag confusion |
-   | `FILE` size | 216 | opaque | see 3 below |
-
-   Known to match, so not worth probing: `struct stat`, `dirent`, `sigaction`,
-   `siginfo`, `termios`, `tm`, `msghdr`, `passwd`, `group`, `addrinfo`,
-   `statvfs`, `statfs`, `flock`, `epoll_event`, `glob`, `hostent`.
-
-2. **Build Mesa from source with symbols** and get a real backtrace out of
-   `lvp_enumerate_physical_devices`. Alpine's `libvulkan_lvp.so` is stripped, so
-   `gdb` gives nothing useful. This is slower than (1) but definitive.
-
-3. **Test `FILE*` crossing directly.** glibc's `FILE` is 216 bytes and musl's is
-   opaque. Pass `stdout` into a foreign object, pass a foreign-`fopen`'d handle
-   back out, check ordering and that neither side crashes. This is the hazard
-   above that is easiest to hit accidentally.
-
-4. **Interpose more of libc**, the way `allocprobe.c` interposes the allocator,
-   and log the last calls before the failure. `getenv`, `sysconf`, `getauxval`,
-   `pthread_create` are the interesting ones.
-
-## 5. Everything else that is not done
-
-| Item | Why | Effort |
-|---|---|---|
-| `glxgears` (the OpenGL path) | shares the ICD/DRI loading path and the same blocker as `vkcube` | follows from section 4 |
-| Cross-libc ABI microtests: allocator crossing, `errno` coherence, `FILE*` crossing, mutex/cond sharing | not written | small each, see section 4 item 1 |
-| 100 load/unload cycles, 60 s `vkcube`, RSS and fd leak check | blocked: `vkcube` does not render | follows from section 4 |
+| `glxgears` on Alpine | Alpine's `mesa-gl` is classic Mesa, not libglvnd, so there is no `libGLX_<vendor>.so.0` for the AppImage's bundled libglvnd to `dlopen`. Host packaging, not libc. Passes on a glibc host (E38) | needs a glvnd musl distro, or a probe that bypasses glvnd |
+| Cross-libc ABI microtests: allocator crossing, `errno` coherence, `FILE*` crossing, mutex/cond sharing (T1.3-T1.7) | not written. Previously called the most likely cause of the rendering failure; it was not, and `vkcube` renders with all of them untested. Still real for code paths this workload does not reach | small each |
+| `/etc/ld.so.cache` blindness | the bundled `ld.so` is patched to a private cache path, so a library reachable only through the host cache (Gentoo `/usr/lib/llvm/N/lib64`, Debian `/usr/lib/llvm-N/lib`) is invisible. Reading the cache in the shim would violate the "no second library search" rule in section 8, so the fix belongs in sharun. The failure is now at least *diagnosed* correctly (E28) | design decision first |
 | Real GPU validation (`radv`/`anv`/`radeonsi`) | no discrete GPU available | needs hardware |
 | NVIDIA proprietary driver on musl | no NVIDIA hardware | needs hardware |
 | aarch64 | no aarch64 hardware. The code is arch-parameterised (`RS_LDSO`, `RS_TRIPLET`, syscall number fallbacks) but this is unverified | needs hardware |
 | Upstreaming the sharun patch | deliberately not done, it is a different repository | hand [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch) to the maintainer |
 | Design R running a real GPU workload | the only end-to-end target is the musl case, where Design R correctly declines to switch | needs a newer-glibc host with a GPU |
 
-## 6. Things that will waste your time
+## 5. Things that will waste your time
 
 Each of these cost real time here. They are recorded so they cost you none.
 
+### About symbol versions
+
+- **An unversioned reference does NOT get the default definition.** This is the
+  whole bug. `pthread_cond_init`, `realpath`, `regexec`, `glob`, `nftw`,
+  `sched_getaffinity` and about 27 others have an obsolete definition glibc
+  still exports, and a stripped or musl-built object lands on it silently.
+  `tools/version_traps.py <libc>` prints the current list for any libc.
+- **`dlsym` is not a way to find the default definition.** Measured in E27:
+  `dlsym(RTLD_NEXT, "pthread_cond_init")` returns the **obsolete** definition on
+  glibc 2.31 and the default one on 2.41. `dlsym(RTLD_DEFAULT, ...)` gets it
+  right on both, but from inside the preload it finds the preload's own
+  forwarder and recurses. Read the version name out of the ELF and use `dlvsym`.
+- **Multi-versioned does not mean dangerous.** glibc 2.34's libpthread merge
+  re-versioned 191 symbols in place: same address, two labels, either is
+  correct. Only a name whose versions have **different `st_value`** is a trap.
+  A list built from "has two versions" is 191 false positives long.
+
+### About the test environment
+
+- **Debian's Vulkan ICD manifest names a bare soname, not a path.**
+  `foreign-dlopen` only ever intercepts absolute paths, so on Debian the whole
+  feature is a no-op and every A/B looks identical and healthy. Alpine and
+  Gentoo use absolute paths. Write your own manifest if you want the code path.
+- **`xvfb-run -a` alone gives you an X server with no GLX.** `glxgears` then
+  says `couldn't get an RGB, Double-buffered visual`, which reads exactly like a
+  driver failure. You need
+  `-s '-screen 0 1024x768x24 +extension GLX +extension RANDR +render'`.
+- **Alpine's `mesa-gl` is not libglvnd.** There is no `libGLX_mesa.so.0` on
+  Alpine, so anything bundling libglvnd has no vendor library to load. That is
+  not fixable from a loader shim.
+- **`ANYLINUX_LIB_FOREIGN_DLOPEN=0` is not always a clean control.** Under the
+  demo AppImage's own AppRun on Alpine, with a search path that reaches `/lib`,
+  the bundled glibc `ld.so` finds `libc.musl-x86_64.so.1` and loads it: the
+  process ends up with **two libc families initialised** and renders anyway.
+  `LD_DEBUG=libs` and `grep 'calling init:'` is what distinguishes an object
+  that was *searched for* from one that was *loaded*.
 - **`/bin/true` is not always an ELF binary.** On Rocky 9 it is a 51-byte shell
   script, and `ld.so` answers `file too short`, which looks exactly like a
   broken runtime and is not. `runtime-select` re-execs itself instead.
 - **`/proc/self/exe` is the loader, not you**, when a program is started as
   `ld-linux.so --library-path ... ./prog`. The kernel exec'd the loader. Use
   `argv[0]`. This produced a false `SELF-TEST FAILED` on every newer host.
-- **`dlerror()` is destructive.** Reading it to log it consumes it, and the
-  caller then gets `NULL`. This was a live bug in upstream.
+
+### About writing the tests themselves
+
+- **`tests/vkprobe.c` used to smash its own stack on SUCCESS.** Its `struct
+  Props` was ~800 bytes shorter than `VkPhysicalDeviceProperties`, so the driver
+  wrote past it every time enumeration *worked*. A segfault that only happens
+  when things go right is the most misleading result available. It now has the
+  tail, a guard band, and a check.
+- **stdout is block-buffered when it is a pipe.** A probe that crashes loses
+  every line it printed, and you conclude it crashed at the start. `setvbuf(...,
+  _IONBF, ...)`.
+- **A verdict computed inside `$( )` increments the counter in a subshell.** The
+  per-line verdicts and the totals then disagree, and the suite reports success
+  while showing a MISMATCH.
+- **`ls a b` fails as a whole when either glob misses.** Used as a capability
+  probe, that silently skips a case on a host that could have run it.
+- **Predicting `FAIL` scores a segfault as a MISMATCH.** "It did not work"
+  arrives as an error code, a refusal to load, or a crash. Normalise first, then
+  predict.
+- **`dlerror()` is destructive, and so is anything that calls `dlsym`.** Reading
+  it to log it consumes it. Less obviously: a diagnostic that probes with
+  `dlsym` replaces the pending message with its own last miss, so the caller is
+  told the wrong object failed. Both were live bugs here.
 - **`mkstemp` rewrites its template in place.** Reusing a spent template makes
   the second loop a silent no-op. This made a fuzz test "pass" nothing.
 - **glibc serves a 16 KB `malloc` from its arena; musl `mmap`s it.** So an
@@ -238,14 +275,13 @@ Each of these cost real time here. They are recorded so they cost you none.
   `openat` of a specific file.
 - **`RTLD_DEFAULT` does not see an object's own dependencies.** A "missing
   symbol" report that only consults the global scope accuses a library of
-  missing 446 symbols its own `DT_NEEDED` closure supplies. Check the dependency
-  handles too.
+  missing 446 symbols its own `DT_NEEDED` closure supplies.
 - **glibc puts version *names* in `.dynsym`** as zero-sized `SHN_ABS` entries
   (`GLIBC_2.32`, `GLIBC_ABI_DT_RELR`). They are ABI markers, not API. A
   generator that treats them as symbols emits C identifiers containing a dot.
 - **Run every runtime test twice**, `ANYLINUX_LIB_FOREIGN_DLOPEN=0` then `=1`. A
   single-sided result cannot distinguish "the fix worked" from "it was already
-  falling back to bundled software rendering".
+  falling back to something else".
 - **Shell scripts must be LF.** A CR becomes `$'...\r'` and yields baffling
   "not found" errors. `.gitattributes` enforces it and `run.ps1` verifies rather
   than trusts.
@@ -253,15 +289,18 @@ Each of these cost real time here. They are recorded so they cost you none.
   the container instead. A PowerShell function that leaves native output on the
   success stream returns an array, not your exit code.
 
-## 7. Diagnostic ladder
+## 6. Diagnostic ladder
 
 When something fails, report **which rung caught it**.
 
 1. **Host driver sane?** `vulkaninfo --summary` natively. If this fails, stop.
-2. **Display, not libc?** Re-run under `xvfb-run -a`. WSI errors are not this
-   project's bug.
+2. **Display, not libc?** Re-run under
+   `xvfb-run -a -s '-screen 0 1024x768x24 +extension GLX +render'`. WSI errors
+   are not this project's bug.
 3. **Feature on?** `ANYLINUX_LIB_DEBUG=1`. No ` [foreign-dlopen.so] >> ` lines
-   means the marker, the env switch, or the `.preload` order is wrong.
+   means the marker, the env switch, or the `.preload` order is wrong. No
+   `foreign: rewriting` line and no `needs no rewrite` line means the path was
+   not absolute and nothing was ever intercepted.
 4. **Which object, which symbol?** `ANYLINUX_LIB_FOREIGN_DRYRUN=1`, or
    `LD_DEBUG=libs,bindings`. An `undefined symbol: X` names the next candidate.
 5. **Is `X` really absent?** Check with `elfsym.py` against the **bundled**
@@ -273,20 +312,37 @@ When something fails, report **which rung caught it**.
    `fgn_global_scope_libs[]` in `src/foreign-dlopen.c` is the list.
 7. **Did the rewrite corrupt the image?** Re-parse
    `$XDG_RUNTIME_DIR/.anylinux-fgn-*.so` with `elfsym.py`.
-8. **Loads but misbehaves?** ABI territory. Section 4 of this file.
+8. **Did it need rewriting at all?** `ANYLINUX_LIB_DEBUG=1` prints
+   `provider <file> -> ...` for each `DT_VERNEED` file and says which version it
+   could not vouch for. On a host older than the bundle the answer should be
+   "nothing was rewritten" (E39).
+9. **Loads, but the wrong definition?** `ANYLINUX_LIB_FOREIGN_NOSTRIP=1` keeps
+   the version tags while still loading from the private copy, which separates
+   "the rewrite broke it" from "the path broke it". If NOSTRIP fixes it, you are
+   looking at a version-binding trap: run `tools/version_traps.py` against the
+   libc and check the symbol is covered by `version-compat.c`.
+10. **Loads and still misbehaves?** ABI territory, and the microtests in 4.2 are
+    unwritten. Bisect with gdb: breakpoint the failing library call, `finish`,
+    read the return value, and `info symbol $pc` at entry — that last step is
+    what found this one.
 
-## 8. Rules that must not be broken
+## 7. Rules that must not be broken
 
 - **Never modify a host file.** Every write goes under `$XDG_RUNTIME_DIR` or
   `$TMPDIR`. `tests/invariants.c` and the checksum comparison in REPORT.md guard
   this.
 - **Bundled libraries always beat host libraries**, for everything except the
   libc runtime set when Design R deliberately switches it.
-- **Exactly one libc family per process.** Never `dlopen` a second libc. It is
-  impossible anyway, and the reason is measured in E8 and E9.
+- **Exactly one libc family per process.** Never `dlopen` a second libc. E8 and
+  E9 measure why for glibc. musl's libc *can* be mapped by a glibc `ld.so`,
+  which is worse, not better: it succeeds quietly. See section 5.
 - **Never strip symbol versions partially.** `DT_VERSYM`, `DT_VERNEED`,
   `DT_VERDEF` and `DT_VERDEFNUM` go together. A verdef without its versym
   segfaults `ld.so`.
+- **Strip only when the object actually needs it.** A rewritten object is a
+  private copy loaded from a path the application did not ask for, and the
+  Vulkan loader says so. On a host that can satisfy every requirement, the right
+  number of rewrites is zero.
 - **Never touch `ld-linux*`, `libc.so.*`, `ld-musl*`.** `fgn_never_touch[]`
   exists for this. `ld-linux` has no `SONAME`, so `RTLD_NOLOAD` cannot catch it.
 - **Do not add library searching to `foreign-dlopen.c`.** Finding libraries is
@@ -294,12 +350,16 @@ When something fails, report **which rung caught it**.
   implementations would diverge and the C one would be the buggy one. The fix
   belongs in [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch).
 - **Regenerate the shim when the bundled glibc changes.**
-  `make shim FLOOR=... TARGET=...`. A stale shim interposes over symbols libc now
-  provides. `src/forward-shim-manifest.json` records the floor it targets.
+  `make shim FLOOR=... TARGET=... MUSL=...`. A stale shim interposes over symbols
+  libc now provides. `src/forward-shim-manifest.json` records the floor it
+  targets. `MUSL` has a default in the Makefile because omitting it drops 33 of
+  35 definitions and silently disarms the musl bridge.
+- **Re-audit the version traps when the bundled glibc changes.** `make traps`.
+  The set only grows with newer glibc.
 - **A test you cannot run is SKIPPED with the specific missing capability
   named.** Never silently omitted, never guessed.
 
-## 9. Repository permissions
+## 8. Repository permissions
 
 Work in `https://github.com/Azathothas/dlopen-experiment` only. `gh` is
 authenticated with account-wide scope, so this is a policy rule you enforce
