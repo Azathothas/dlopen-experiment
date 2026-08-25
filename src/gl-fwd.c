@@ -29,6 +29,7 @@
 #define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -211,19 +212,27 @@ static const char *host_candidates[] = {
 	NULL
 };
 
-/* The shim is always the app's libGL.so.1: its SONAME matches glxgears'
- * DT_NEEDED, so ld.so binds the app to the shim and never loads the bundled
- * glvnd dispatcher. It must therefore always forward, to whatever libGL.so.1
- * the host ships:
+/* The shim is the app's libGL.so.1: its SONAME matches an app's DT_NEEDED, so
+ * ld.so binds the app to the shim and never loads the bundled glvnd dispatcher.
+ * That hijack is unconditional once this object is loaded, so the shim must do
+ * the right thing on BOTH host classes itself:
  *
- *   - classic Mesa: every musl distro, plus pre-glvnd glibc distros such as
- *     Ubuntu 14.04 and Debian 8. No glvnd vendor lib exists there, which is
- *     the exact failure this shim fixes.
- *   - glvnd: modern glibc distros. Forwarding reaches the host's glvnd
- *     dispatcher, which loads the host's libGLX_mesa.so.0 the same way the
- *     bundled dispatcher would have.
+ *   - classic Mesa (every musl distro, plus pre-glvnd glibc distros such as
+ *     Ubuntu 14.04 and Debian 8): there is no glvnd vendor lib, so the bundled
+ *     dispatcher cannot work. The shim forwards to the host's classic
+ *     libGL.so.1, which foreign-dlopen.so loads across the libc gap.
  *
- * host_has_glvnd() only selects a debug message, not behaviour. */
+ *   - glvnd (modern glibc distros): the bundled dispatcher works. The shim
+ *     loads the bundled glvnd libGL.so.1 itself (RTLD_GLOBAL, so its FULL
+ *     symbol table reaches the global scope) and forwards the 33 entry points
+ *     it owns to it. The app's remaining GL/GLX symbols resolve straight to
+ *     the bundled glvnd from the global scope, so the shim is a transparent
+ *     thin layer rather than a break.
+ *
+ * Only the full registry-generated wrapper set could make the shim forward
+ * EVERYTHING on a glvnd host; the global-scope fallback above is what keeps
+ * the current 33-symbol shim from regressing apps that need more.
+ */
 static int host_has_glvnd(void) {
 	const char *markers[] = {
 		"/usr/lib/libGLX.so.0",
@@ -242,18 +251,32 @@ static int host_has_glvnd(void) {
 
 __attribute__((constructor))
 static void glfwd_init(void) {
-	const char **c;
-	for (c = host_candidates; *c; c++) {
-		host_gl = dlopen(*c, RTLD_LAZY | RTLD_LOCAL);
+	if (host_has_glvnd()) {
+		/* glvnd host: the bundled dispatcher works. Load it ourselves so its
+		 * full GL/GLX export table is globally visible, then forward our 33
+		 * symbols through it. */
+		const char *appdir = getenv("APPDIR");
+		char bundled[PATH_MAX];
+		if (appdir && *appdir) {
+			snprintf(bundled, sizeof(bundled), "%s/lib/libGL.so.1", appdir);
+			host_gl = dlopen(bundled, RTLD_GLOBAL | RTLD_LAZY | RTLD_NODELETE);
+		}
 		if (host_gl)
-			break;
+			fprintf(stderr, "[gl-fwd] glvnd host: forwarding to bundled glvnd\n");
+	} else {
+		const char **c;
+		for (c = host_candidates; *c; c++) {
+			host_gl = dlopen(*c, RTLD_LAZY | RTLD_LOCAL);
+			if (host_gl)
+				break;
+		}
+		if (host_gl)
+			fprintf(stderr, "[gl-fwd] using host libGL: %s (classic)\n", *c);
 	}
 	if (!host_gl) {
-		fprintf(stderr, "[gl-fwd] could not load any host libGL.so.1\n");
+		fprintf(stderr, "[gl-fwd] could not load any libGL.so.1\n");
 		return;
 	}
-	fprintf(stderr, "[gl-fwd] using host libGL: %s (%s)\n", *c,
-	        host_has_glvnd() ? "glvnd" : "classic");
 
 	RESOLVE(glXChooseVisual);
 	RESOLVE(glXCreateContext);
