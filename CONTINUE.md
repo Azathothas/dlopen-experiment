@@ -86,7 +86,7 @@ Expect the union over the Mesa+LLVM closure to be exactly
 .\experiments\appimage.ps1
 ```
 
-Expect **11/11 on the glibc host** and **10/10 with one named skip on musl**.
+Expect **12/12 on the glibc host** and **11/11 with one named skip on musl**.
 It downloads the demo AppImage once into `.tmp` (sha256 verified), extracts it
 inside a container because the payload is DwarFS, builds `src/` on the glibc
 2.31 **floor**, and then runs the same suite on `alpine:3.22` and
@@ -105,7 +105,13 @@ E31  control, feature off              NO-DEVICES  (VK_ERROR_INCOMPATIBLE_DRIVER
 E32  this repo, feature on             DEVICES     (llvmpipe)
 E37a AppImage as shipped, vkcube       reported zero accessible devices
 E37  this repo, vkcube                 Selected GPU 0: llvmpipe (LLVM 20.1.8)
+E40  one file replaced, no variables    Selected GPU 0: llvmpipe (LLVM 20.1.8)
 ```
+
+E40 is the one to look at first. Every other case forces something -- the
+feature, the ICD, the loader. E40 replaces `lib/foreign-dlopen.so` inside the
+AppDir and runs it with no `ANYLINUX_*` and no `VK_DRIVER_FILES` at all, which
+is the only form of the claim that matches what was asked.
 
 ### 3.4 Driving it by hand
 

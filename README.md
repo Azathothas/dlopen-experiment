@@ -45,7 +45,7 @@ because a glibc-linked process cannot exec under musl's `ld.so`.
 | Goal | Result | Proof |
 |---|---|---|
 | Evidence table still holds | **31/31**, up from 14/14 | [`experiments/run.ps1`](experiments/run.ps1), cases in [`30-run-tests.sh`](experiments/30-run-tests.sh) |
-| AppImage end to end, on a real host driver | **11/11 glibc, 10/10 musl** (one named skip) | [`experiments/appimage.ps1`](experiments/appimage.ps1), cases in [`40-appimage.sh`](experiments/40-appimage.sh) |
+| AppImage end to end, on a real host driver | **12/12 glibc, 11/11 musl** (one named skip) | [`experiments/appimage.ps1`](experiments/appimage.ps1), cases in [`40-appimage.sh`](experiments/40-appimage.sh) |
 | Host driver built against newer glibc loads into older bundled glibc | **Achieved** | E5 (shim path), E12 (host runtime, no shim), [`30-run-tests.sh`](experiments/30-run-tests.sh) |
 | Host runtime selected correctly per distro | **8/8 distros** | [`src/runtime-select.c`](src/runtime-select.c), E17-E21, [REPORT.md](REPORT.md#4-design-r-host-runtime-selection) |
 | Mixed runtime set refused (the configuration that segfaults) | **Refused**, with an accept-control | E20 refuses, E21 accepts, [`30-run-tests.sh`](experiments/30-run-tests.sh) |
@@ -223,7 +223,7 @@ elfsym.py, gap.py                  dependency-free ELF reader and gap driver
 ## Evidence table
 
 Run by `experiments/run.ps1`. E1-E13 measure the problem, E14-E29 measure the
-fix. E30-E39 are the separate AppImage suite, `experiments/appimage.ps1`. Every
+fix. E30-E40 are the separate AppImage suite, `experiments/appimage.ps1`. Every
 case states a prediction and the harness reports MATCH or MISMATCH; a MISMATCH
 is a finding, not a harness bug.
 
@@ -269,6 +269,7 @@ is a finding, not a harness bug.
 | E35 | exactly one libc family mapped | PASSES |
 | E36 | 100 load/unload cycles | no growth |
 | E37a/E37 | `vkcube`, as shipped vs this repo | zero devices -> **renders** |
+| E40 | **replace one file in the AppDir, set no variables at all, run it** | as shipped: `Do you have a compatible Vulkan ICD installed?` / with this: **`Selected GPU 0: llvmpipe`** |
 | E38 | `glxgears` | PASSES on glibc, SKIPPED on Alpine with the reason |
 
 ## Building

@@ -17,7 +17,7 @@ Every claim is either backed by a command whose output is quoted, or labelled
 | Completion criterion | Status |
 |---|---|
 | Both goals demonstrated by a test that fails before and passes after | **Yes.** Goal 1: E5, E12. Goal 2: E22/E23 for the mechanism, E30/E32 and E37a/E37 for the end-to-end |
-| The evidence harness still reports all predictions held | **Yes, 31/31**, up from 22/22, with 9 new cases. The AppImage suite adds 11 on a glibc host and 10 on a musl host |
+| The evidence harness still reports all predictions held | **Yes, 31/31**, up from 22/22, with 9 new cases. The AppImage suite adds 12 on a glibc host and 11 on a musl host |
 | No host file modified, verified by checksum | **Yes.** T4.3, identical sha256 before and after |
 | Bundled libraries still win, verified via `dladdr` | **Yes.** T4.2, all resolved under `$APPDIR` |
 | A forward-compatibility story that does not depend on foresight | **Yes.** Host-runtime selection for the unenumerable gap, a generated shim for the enumerable one, and a build-time audit (E26) for the version traps |
@@ -617,6 +617,15 @@ Alpine's own musl-built lavapipe:
 The `feature off` column is why the rest of the table means anything: the same
 command with the same binaries cannot use the host driver at all.
 
+And the same thing with nothing forced at all -- **E40**, one file replaced
+inside the AppDir, no `ANYLINUX_*`, no `VK_DRIVER_FILES`, the marker the AppDir
+already carries turning the feature on by itself:
+
+```
+as shipped   Do you have a compatible Vulkan installable client driver (ICD) installed?
+with this    Selected GPU 0: llvmpipe (LLVM 20.1.8, 256 bits)
+```
+
 #### What this also fixed
 
 The same defect ran the other way on a **glibc** host. Reported independently in
@@ -711,7 +720,7 @@ the version-binding trap and the reporting defects:
 ### Tier 1b, the AppImage end-to-end suite
 
 `experiments/appimage.ps1` runs a real AppImage against a real host driver on
-two hosts and reports **11/11 on glibc** and **10/10 with one skip on musl**.
+two hosts and reports **12/12 on glibc** and **11/11 with one skip on musl**.
 It fetches the demo AppImage once (sha256 verified), extracts it in a container
 because the payload is DwarFS, builds `src/` on the glibc 2.31 floor, and then
 measures E30 through E39 on each host. Every case is run with the feature off
@@ -836,7 +845,7 @@ T5.3  SKIPPED - no aarch64 hardware. The code is arch-parameterised
 ## 8. Measured versus assumed
 
 **Measured:** every table and quoted output above, plus `experiments/run.ps1`
-(31/31), `experiments/appimage.ps1` (11/11 glibc, 10/10 musl with one named
+(31/31), `experiments/appimage.ps1` (12/12 glibc, 11/11 musl with one named
 skip), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
 the corpus test, and the compiled-and-run sharun patch.
 

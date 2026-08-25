@@ -219,6 +219,20 @@ else
     use_preload patched
     run E37 OK "Selected GPU" render_verdict vkcube --c 20
 
+    # E40: the whole thing stated the way a user would.
+    #
+    # Replace exactly one file inside the AppDir, lib/foreign-dlopen.so, and run
+    # it. No ANYLINUX_* variables and no VK_DRIVER_FILES: the AppDir already
+    # carries .foreign-dlopen-enabled, so the feature turns itself on, and the
+    # Vulkan loader finds the host's ICD by itself.
+    #
+    # Every other case here forces something -- the feature, the ICD, the
+    # loader. This one forces nothing, which is the only version of the claim
+    # that matches what was actually asked.
+    run E40 OK "Selected GPU" env -u VK_DRIVER_FILES APPDIR="$APPDIR" \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" sh -c \
+        "timeout 90 xvfb-run -a -s '$XA' $APPDIR/AppRun.sh vkcube --c 20 2>&1 | tail -4"
+
     # The OpenGL path needs a libglvnd VENDOR library on the host, because the
     # AppImage bundles libglvnd's libGL/libGLX/libGLdispatch and those dlopen
     # libGLX_<vendor>.so.0. Alpine's mesa-gl is classic Mesa, not glvnd, so
