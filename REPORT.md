@@ -520,14 +520,44 @@ and its control).
 | T2.5 | Design R across the distro matrix | **PASS** |
 | T2.6 | forced `ANYLINUX_RUNTIME=bundled` on a newer host | **PASS** (E19) |
 | T2.7 | cache-only library found via `--library-path` | **PASS** (E13c) |
-| T3.1 | Alpine baseline fails before the fix | **PASS** — fails with a symbol-resolution error under `xvfb` |
+| T3.1 | Alpine baseline fails before the fix | **PASS, with a caveat** — see below |
 | T3.2 | `vkcube` with host driver | **FAIL** — §6 |
 | T3.3 | `glxgears` | **FAIL** — same blocker |
-| T3.4 | driver provenance is the host's | **PASS** — rewritten copy derives from `/usr/lib/libvulkan_lvp.so`; trace confirms |
+| T3.4 | driver provenance is the host's | **PASS** — see below |
 | T4.1 | exactly one libc family | **PASS** — glibc yes, musl no |
 | T4.2 | bundled wins, via `dladdr` | **PASS** |
 | T4.3 | no host file modified | **PASS** — identical sha256 over `/usr/lib`, `/lib`, `/etc/ld.so.conf.d` |
 | T4.4 | no regression on glibc hosts | **PASS** — see below |
+
+**T3.1 caveat.** Its PASS condition is "fails *with a symbol-resolution error*,
+not a display error." At the AppImage level, under `xvfb-run -a`, the message
+is `vkEnumeratePhysicalDevices reported zero accessible devices` — a device
+error, because the Vulkan loader swallows an ICD that fails to load and reports
+only the absence. The symbol-resolution error is real but one layer down, and
+is visible directly at T2.2 and in the trace:
+
+```
+FAILED: dlopen: libc.musl-x86_64.so.1: cannot open shared object file
+```
+
+So the baseline does fail for the right reason, but the criterion as written is
+only satisfied by looking below the loader. Counting it as a clean PASS on the
+AppImage message alone would be wrong.
+
+**T3.4 in detail.** The mapped driver is
+`$XDG_RUNTIME_DIR/.anylinux-fgn-dbdb70ee.so`, not a path under `$APPDIR` — so
+the bundled-software-rendering trap is avoided. That file is the rewritten copy
+of the host's driver, which the Vulkan loader itself confirms:
+
+```
+[Vulkan Loader] DEBUG | DRIVER: Searching for ICD drivers named /usr/lib/libvulkan_lvp.so
+[Vulkan Loader] WARNING | LAYER: Path to given binary /usr/lib/libvulkan_lvp.so
+                was found to differ from OS loaded path /tmp/xdg/.anylinux-fgn-dbdb70ee.so
+```
+
+The indirection is inherent to the design — the whole mechanism is loading a
+*rewritten* copy — so provenance has to be established through the rewrite,
+not by the mapped path alone.
 
 **T4.4 in detail** — the AppImage run on three glibc hosts with the *stock
 upstream* preload and with the patched one, in both modes. The outcome is
