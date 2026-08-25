@@ -63,7 +63,7 @@ Everything here is reproducible with **one command**:
 It orchestrates three throwaway containers over a shared volume — `alpine:3.22` builds a
 faithful musl library, `debian:trixie-slim` (glibc 2.41) builds libraries needing new symbols,
 `debian:bullseye-slim` (glibc 2.31) stands in for "an AppImage bundling an older glibc" — and
-prints a MATCH/MISMATCH table. **Last run: 11/11 predictions held.**
+prints a MATCH/MISMATCH table. **Last run: 14/14 predictions held.**
 
 ### 3.1 The evidence table
 
@@ -81,6 +81,9 @@ prints a MATCH/MISMATCH table. **Last run: 11/11 predictions held.**
 | **E10** | exec-time switch to the host's **whole** runtime (`ld.so` + `libc`) | **WORKS** |
 | **E11** | exec-time switch with a **mixed** old/new runtime | **SIGSEGV** (exit 139) |
 | **E12** | the E3/E4 failing library, run under the host's **complete** runtime, **no shim** | **WORKS** — `newlib_answer()=99` |
+| **E13a** | lib in `/usr/local/lib`, sharun-style `--library-path` **without** it, cache allowed | **WORKS** — found via `/etc/ld.so.cache` |
+| **E13b** | same, `--inhibit-cache` (reproduces anylinux's patched `ld.so`) | **FAILS** — `cannot open shared object file` |
+| **E13c** | same, cache inhibited but the directory **added to `--library-path`** | **WORKS** |
 
 ### 3.2 What each result means
 
@@ -110,6 +113,14 @@ result** — the very library that failed in E3 and E4 loads and runs with **no 
 because `arc4random` and `strlcpy` came from the host's own `libc.so.6`. But it only works if the
 **entire matched set** is switched: mixing an old `libdl.so.2` with a new `libc.so.6` segfaults
 instantly (E11).
+
+**E13 shows library *discovery* is a separate failure mode from symbol resolution.** Anylinux
+patches `ld-linux.so` to stop it reading `/etc/ld.so.cache` — documented in `HALL-OF-FAME.md`,
+because reading it [segfaults instantly on some
+systems](https://github.com/pkgforge-dev/Anylinux-AppImages/issues/766#issuecomment-5182230177).
+`--inhibit-cache` reproduces that patched loader exactly. With the cache gone, **`--library-path`
+is the only discovery mechanism there is**, and anything it omits is invisible — even though the
+host's own loader would find it. `/usr/local/lib` is exactly such a directory. See §5.5.
 
 ### 3.3 How big is the forward-compat surface? **[MEASURED]**
 
@@ -339,6 +350,66 @@ And: **keep the legacy split libraries loaded** (`libpthread.so.0`, `libdl.so.2`
 Plus a **dry-run mode** (`ANYLINUX_LIB_FOREIGN_DRYRUN=1`) reporting what would be rewritten and
 which symbols would remain unresolvable — this makes `T0.x` testable with no GPU and no Alpine.
 
+### 5.5 Design P — library search-path completeness (fix in **sharun**, not here)
+
+**E13 is the evidence; the architectural call is that this does not belong in
+`foreign-dlopen.c`.**
+
+`foreign-dlopen.c` today has no `LD_LIBRARY_PATH` handling and no `/etc/ld.so.cache` parsing. Its
+`fgn_find_candidate()` only probes directories already on the active load stack, and it recovers
+paths by *scraping `dlerror()` text* for `"(required by /abs/path)"`. That is a fallback, not a
+search algorithm.
+
+**Do not fix that by teaching `foreign-dlopen.c` to search.** Its job is to *rewrite* an object
+`ld.so` has already located; finding libraries is `ld.so`'s job, driven by `--library-path`, which
+**sharun** assembles. Two search implementations would diverge, and the C one would be the buggy
+one. Put the fix in one place: make `--library-path` complete.
+
+**What sharun already does** (`src/main.rs` ≈1030–1066) — more than the objection assumes:
+
+1. the AppDir's generated `lib.path` (a walk of the bundled lib dir);
+2. **appends `$LD_LIBRARY_PATH`** — so that part is already handled;
+3. prepends `$SHARUN_EXTRA_LIBRARY_PATH`, appends `$SHARUN_FALLBACK_LIBRARY_PATH`;
+4. appends `/usr/lib:/lib`, then `/usr/lib64:/lib64` + `/usr/lib/x86_64-linux-gnu`
+   (or the 32-bit / aarch64 variants);
+5. appends NixOS's `/run/opengl-driver/lib:/run/current-system/sw/lib`.
+
+**The gaps to close — measured across five distros:**
+
+| Distro | `ld.so.conf` entries | `/usr/local/lib`? | `/usr/local/lib64`? |
+|---|---|---|---|
+| Alpine 3.22 | *(empty; musl)* | yes | no |
+| Debian 13 | `/lib/x86_64-linux-gnu`, `/usr/lib/x86_64-linux-gnu`, `/usr/local/lib`, `/usr/local/lib/x86_64-linux-gnu` | yes | no |
+| Fedora 44 | *(empty in base image)* | yes | yes |
+| Arch | *(empty in base image)* | yes | no |
+| openSUSE TW | `/usr/local/lib`, `/usr/local/lib64` | yes | yes |
+
+1. **`/usr/local/lib`, `/usr/local/lib64`, `/usr/local/lib/<triplet>`** — present on **every**
+   distro surveyed, in `ld.so.conf` on Debian and openSUSE, and **absent from sharun's list**.
+   This is the concrete bug E13b demonstrates.
+2. **Parse `/etc/ld.so.conf` and `/etc/ld.so.conf.d/*.conf`** (honour `include` globs). These are
+   **plain text** — safe to read, and they are the distro's own authoritative answer. This gets the
+   benefit of the cache without touching the binary cache that caused the segfault.
+3. **musl hosts:** read `/etc/ld-musl-<arch>.path`; musl's built-in default is
+   `/lib:/usr/local/lib:/usr/lib`.
+4. **Other triplets:** `riscv64-linux-gnu`, `arm-linux-gnueabihf`, `powerpc64le-linux-gnu`,
+   `s390x-linux-gnu` — currently only x86-64/i386/aarch64 are handled.
+5. **Non-FHS prefixes:** Termux `/data/data/com.termux/files/usr/lib`, Flatpak `/app/lib`,
+   Guix `/run/current-system/profile/lib`.
+6. **`/usr/libexec`** — present on Debian/Fedora/openSUSE, occasionally holds libraries.
+
+**Rules for the assembled path:**
+- **Bundled first, host after — always.** A host directory must never precede `$APPDIR/lib`
+  (`T4.2` guards this). Everything appended here is a *fallback*.
+- **Deduplicate and drop non-existent directories.** Every entry costs a `stat` per lookup per
+  miss; a bloated path is a measurable startup cost, not just untidiness.
+- **Keep it inspectable.** Log the final path under `ANYLINUX_LIB_DEBUG=1`; "library not found"
+  with no way to see the search path is the failure mode being fixed.
+
+> **Permission boundary.** `sharun` is a **different repository** (`VHSgunzo/sharun`). Under §7.1
+> you may **not** open issues or PRs there. Produce the patch plus its rationale and evidence in
+> *this* repo, and hand it to the user to upstream.
+
 ### 5.3 Design C — `dlmopen(LM_ID_NEWLM)` — **rejected, with evidence**
 
 E9 settles it: a private namespace does not escape the `ld.so`↔`libc` version lock. Independently
@@ -452,10 +523,10 @@ README.md                       results summary
 .gitattributes                  LF for .sh -- a CR breaks container scripts
 elfsym.py                       dependency-free ELF64 reader              [provided, validated]
 gap.py                          symbol-gap driver (--fetch)               [provided, validated]
-experiments/run.ps1             one-command evidence table                [provided, 11/11 pass]
+experiments/run.ps1             one-command evidence table (E1-E13)      [provided, 14/14 pass]
 experiments/10-build-musl.sh    stage 1: Alpine musl probe
 experiments/20-build-newglibc.sh stage 2: newer-glibc libs + runtime
-experiments/30-run-tests.sh     stage 3: E1-E12
+experiments/30-run-tests.sh     stage 3: E1-E13
 scripts/wsl-ephemeral.ps1       ephemeral WSL distros                     [provided, validated]
 src/                            the fix
 analysis/                       measured reports
@@ -468,7 +539,7 @@ REPORT.md                       §10
 
 ### Phase A — Ground truth (Tier 0/1)
 
-- **A1.** Run `experiments/run.ps1`; confirm 11/11. Any MISMATCH is a finding — investigate before coding.
+- **A1.** Run `experiments/run.ps1`; confirm 14/14. Any MISMATCH is a finding — investigate before coding.
 - **A2.** Run `python3 gap.py --fetch`; confirm the musl gap is `['___environ', 'atexit']`.
 - **A3.** Extract the demo AppImage and inventory it.
   The embedded filesystem is **DwarFS**, not squashfs — verified: the ELF runtime ends at offset
@@ -491,7 +562,11 @@ REPORT.md                       §10
 - **B3.** `___environ` `st_name` remap + tail-merge guard.
 - **B4.** Keep legacy split libs loaded (fixes the E6 class).
 - **B5.** Dry-run mode and loud diagnostics.
-- **B6.** Written verdict on Designs C and D.
+- **B6.** Design P: a sharun patch closing the §5.5 path gaps (`/usr/local/lib*`,
+  `/etc/ld.so.conf{,.d}` parsing, musl path file, extra triplets), plus a test proving a library
+  reachable only via the cache is still found with `--inhibit-cache`. Deliver as a patch in this
+  repo — **do not** upstream it yourself.
+- **B7.** Written verdict on Designs C and D.
 
 ### Phase C — Prove
 
@@ -550,6 +625,43 @@ only ones. Report **which rung** caught each failure.
 7. **Rewrite corrupted the image?** Re-parse `$XDG_RUNTIME_DIR/.anylinux-fgn-*.so` with `elfsym.py`.
 8. **Loads but misbehaves?** ABI territory — §9.3 and the hazard table.
 
+
+### 9.0.1 No GPU? Test with software rendering — this is mandatory, not a fallback
+
+**If the machine has no GPU, or no usable host driver, you must still run every Tier 2/3 test
+using a software rasteriser. Do not mark them SKIPPED.** Software Vulkan (Mesa's **lavapipe**,
+`libvulkan_lvp.so`) and software GL (**llvmpipe**) exercise the *identical* `dlopen` path — the
+same ICD discovery, the same cross-libc load, the same rewrite. The only thing they do not
+exercise is vendor-driver-specific behaviour, which is Tier 5.
+
+This is exactly what the upstream CI does: the demo's own build script installs `vulkan-swrast`
+with the comment *"CI has no available gpu for the test"*, and Solo's Alpine job installs
+`mesa-vulkan-swrast`.
+
+| Distro | Software Vulkan package | Also install |
+|---|---|---|
+| Alpine | `mesa-vulkan-swrast` | `vulkan-tools`, `mesa-demos`, `xvfb-run` |
+| Arch | `vulkan-swrast` | `vulkan-tools`, `mesa-utils`, `xorg-server-xvfb` |
+| Debian / Ubuntu | `mesa-vulkan-drivers` | `vulkan-tools`, `mesa-utils`, `xvfb` |
+| Fedora | `mesa-vulkan-drivers` | `vulkan-tools`, `glx-utils`, `xorg-x11-server-Xvfb` |
+| openSUSE | `libvulkan_lvp` | `vulkan-tools`, `Mesa-demo-x`, `xorg-x11-server-Xvfb` |
+
+Pin the software driver explicitly so a half-working host GPU cannot silently take over and
+invalidate the result:
+
+```bash
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json   # older loaders
+export VK_DRIVER_FILES="$VK_ICD_FILENAMES"                            # newer loaders
+export LIBGL_ALWAYS_SOFTWARE=1                                        # llvmpipe for GL
+export SHARUN_ALLOW_SYS_VKICD=1                                       # let sharun use a host ICD
+vulkaninfo --summary | grep -i llvmpipe     # expect lavapipe/llvmpipe
+xvfb-run -a vkcube --c 100                  # finite frame count: exits on its own
+```
+
+`vulkaninfo` needs **no surface**, so use it as the first check; `vkcube` and `glxgears` need one,
+hence `xvfb-run`. Record in `REPORT.md` which renderer actually served each run — a result that
+does not name the renderer is not a result.
+
 ### 9.1 Tier 0 — static (any OS, no Linux)
 
 | ID | Test | PASS |
@@ -598,7 +710,7 @@ regression gate; run it before every commit.**
 
 | ID | Test | PASS |
 |---|---|---|
-| T2.1 | Alpine native baseline: `apk add mesa-vulkan-swrast vulkan-tools && vulkaninfo --summary` | lavapipe listed |
+| T2.1 | Alpine native baseline: `apk add mesa-vulkan-swrast vulkan-tools && vulkaninfo --summary` | **lavapipe listed by name.** If this fails, stop — nothing downstream is interpretable |
 | T2.2 | foreign-load the real ICD | handle non-NULL, `vk_icdGetInstanceProcAddr` resolves, `vkCreateInstance` succeeds |
 | T2.3 | debug trace | each host object rewritten once, cached; **no** attempt to load musl libc |
 | T2.4 | corpus: foreign-`dlopen` every `.so` in Alpine `/usr/lib`, before vs after | successes ≥ baseline; **zero regressions**; gains dominated by `atexit` importers |
@@ -610,6 +722,7 @@ ICD discovery, X11, and rendering.
 
 | T2.5 | Design R selector across the §6.2 distro matrix | picks `host` on every glibc newer than bundled, `bundled` on older and on musl; **never** assembles a mixed set; decision logged with a reason |
 | T2.6 | forced `ANYLINUX_RUNTIME=bundled` on a newer host | still works via shim path; proves the fallback is real, not theoretical |
+| T2.7 | with the patched (cache-inhibited) loader, a library reachable only via `/etc/ld.so.cache` | still resolves, because `--library-path` now covers its directory (E13c) |
 
 **T2.4 is what separates a fix from a demo.** Solo runs exactly this over 2 100+ objects per commit.
 The zero-regression clause is the hard gate.
@@ -717,6 +830,10 @@ Say so in `REPORT.md` rather than implying otherwise.
 - **Never touch `ld-linux*`, `libc.so.*`, `ld-musl*`** — `fgn_never_touch[]` exists for a reason;
   `ld-linux` has no `SONAME`, so `RTLD_NOLOAD` cannot catch it.
 - **Symbol availability ≠ ABI compatibility.** A successful `dlopen` is the start of correctness.
+- **"The host loader can find it, so we can too."** Not with anylinux's patched `ld.so`: it never
+  reads `/etc/ld.so.cache` (E13b). Discovery comes only from `--library-path`.
+- **Do not add library searching to `foreign-dlopen.c`.** Two search implementations will diverge
+  (§5.5). Fix the path in sharun.
 - **PowerShell:** piping a string to a native process re-encodes it and corrupts the tail — mount
   scripts instead (this bit `run.ps1`; see its comments). A function that leaves native output on
   the success stream returns an **array**, not your exit code.
@@ -734,6 +851,9 @@ Say so in `REPORT.md` rather than implying otherwise.
 | Demo recipe / binary | `useful-tools/demo/vkcube-glxgears-host-drivers-appimage.sh` · [release `demo`](https://github.com/Samueru-sama/Anylinux-AppImages/releases/download/demo/vkcube+glxgears-host-drivers-demo-x86_64.AppImage) (10.7 MB, DwarFS) |
 | Case-3 reference (read-only) | [pg83/solo](https://github.com/pg83/solo) — `lib/elf_loader.cpp`, `lib/glibc_shim.cpp`, `dev/abi_probe.c`, `dev/generate_glibc_stubs.py`, `.github/workflows/ci.yml` |
 | Foreign-`ld.so` trampoline | [graphitemaster/detour](https://github.com/graphitemaster/detour) · [pfalcon/foreign-dlopen](https://github.com/pfalcon/foreign-dlopen) |
-| Real-world breakage catalogue | `Anylinux-AppImages/HALL-OF-FAME.md` |
+| **Launcher assembling `--library-path`** | [VHSgunzo/sharun](https://github.com/VHSgunzo/sharun) — `src/main.rs` (~1 161 lines; path assembly at ≈1030–1066), plus the `lib4bin` collector script. **Read-only: patch here, do not upstream yourself** |
+| **Single-binary packager with GPU bundling** | [QaidVoid/onelf](https://github.com/QaidVoid/onelf) — `crates/onelf/src/bundle/gpu.rs` enumerates DRI/GBM/Vulkan ICD search paths; `bundle/resolve.rs` does dependency resolution. Useful prior art for the §5.5 path list |
+| Real-world breakage catalogue | `Anylinux-AppImages/HALL-OF-FAME.md` (incl. the `ld.so.cache` segfault that forced the patched loader) |
+| Other tooling already wired up | the `Anylinux-AppImages` repo links many more tools from `quick-sharun.sh` — `pathmap`/`ld-preload-open`, `uruntime`, `get-debloated-pkgs.sh`, the `hooks/` directory. **Check there before writing anything new** |
 | gconv cautionary tale | [Dolphin#63](https://github.com/pkgforge-dev/Dolphin-emu-AppImage/issues/63) · [Dolphin#20](https://github.com/pkgforge-dev/Dolphin-emu-AppImage/issues/20) |
 | musl vs glibc | https://wiki.musl-libc.org/functional-differences-from-glibc.html |

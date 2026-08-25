@@ -164,6 +164,31 @@ run E12 OK "newlib_answer()=99" \
     /work/hostrt/ld-linux-x86-64.so.2 --library-path /work/hostrt ./loader /work/libnew.so newlib_answer
 
 echo
+echo "-- F. library search path: --library-path vs /etc/ld.so.cache ---"
+# Anylinux patches ld-linux.so to skip /etc/ld.so.cache (it segfaults on some hosts),
+# so --library-path becomes the ONLY discovery mechanism. --inhibit-cache reproduces
+# that patched loader exactly. /usr/local/lib is a real dir on every distro surveyed
+# and is absent from sharun's hardcoded list -- so this is a live gap, not a hypothetical.
+echo "int foo_answer(void){return 55;}" > foo.c
+mkdir -p /usr/local/lib
+gcc -shared -fPIC -Wl,-soname,libfoo.so.1 foo.c -o /usr/local/lib/libfoo.so.1
+ldconfig
+cat > byname.c <<'CEOF'
+#include <stdio.h>
+#include <dlfcn.h>
+int main(void){ void *h = dlopen("libfoo.so.1", RTLD_NOW);
+    if(!h){ printf("FAILED: %s\n", dlerror()); return 1; }
+    int (*f)(void) = dlsym(h,"foo_answer"); printf("OK: %d\n", f?f():-1); return 0; }
+CEOF
+gcc -O2 byname.c -o byname -ldl
+LD=/lib64/ld-linux-x86-64.so.2
+SHARUN_LIKE="/work:/usr/lib:/lib:/usr/lib64:/lib64:/usr/lib/x86_64-linux-gnu"   # no /usr/local/lib
+
+run E13a OK   "OK: 55" $LD --library-path "$SHARUN_LIKE" ./byname
+run E13b FAIL "cannot open shared object file" $LD --library-path "$SHARUN_LIKE" --inhibit-cache ./byname
+run E13c OK   "OK: 55" $LD --library-path "/usr/local/lib:$SHARUN_LIKE" --inhibit-cache ./byname
+
+echo
 echo "================================================================"
 echo " predictions matched: $PASS   mismatched: $FAIL"
 echo "================================================================"

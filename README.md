@@ -6,7 +6,7 @@ glibc, or musl — without patching host files, without a second libc, and witho
 This repo answers that with **runnable experiments**, not argument. Everything below was measured.
 
 ```powershell
-.\experiments\run.ps1        # ~2 min, needs podman or docker. Last run: 11/11 predictions held.
+.\experiments\run.ps1        # ~2 min, needs podman or docker. Last run: 14/14 predictions held.
 ```
 
 ## The short version
@@ -18,6 +18,7 @@ This repo answers that with **runnable experiments**, not argument. Everything b
 | Then where do future symbols come from? | **The host's own runtime, chosen at `execve`.** The library that fails in E3/E4 runs fine under the host's complete runtime with **no shim at all** (E12) |
 | Is a shim still needed? | **Yes, for the gap you can enumerate** — and for musl hosts, where there is no host glibc to switch to (E2, E5) |
 | Why does stripping work as often as it does? | glibc 2.34 merged `libpthread`/`libdl`/`librt` into `libc.so.6`. Those symbols still exist in the old split libs — stripping succeeds **iff** those libs are loaded (E6 vs E7) |
+| Is finding the library a separate problem from resolving its symbols? | **Yes.** Anylinux patches `ld.so` to skip `/etc/ld.so.cache` (it segfaults on some hosts), so `--library-path` is the *only* discovery mechanism. A library in `/usr/local/lib` — present on every distro surveyed, absent from sharun's list — becomes invisible (E13) |
 
 The design that follows: **switch to the host runtime when it is newer and complete; otherwise keep
 the bundled runtime and cover the enumerable delta with a generated shim; always fail loudly naming
@@ -39,6 +40,24 @@ the symbol.** Details and the full task breakdown are in [PROMPT.md](PROMPT.md).
 | E10 | exec-time switch to host's **whole** runtime | WORKS |
 | E11 | exec-time switch with a **mixed** runtime | SIGSEGV |
 | E12 | E3/E4's library under host's complete runtime, **no shim** | WORKS |
+| E13a | lib in `/usr/local/lib`, `--library-path` omits it, cache allowed | WORKS (found via cache) |
+| E13b | same, `--inhibit-cache` (= anylinux's patched loader) | FAILS |
+| E13c | same, cache inhibited, directory added to `--library-path` | WORKS |
+
+## Library discovery
+
+Separate from symbol resolution, and separately broken. `foreign-dlopen.c` has no
+`LD_LIBRARY_PATH` handling and no cache parsing — it scrapes `dlerror()` text for
+`"(required by ...)"`. The fix belongs in **sharun** (which already assembles `--library-path` and
+already honours `LD_LIBRARY_PATH`), not in a second search implementation in C. Measured gaps:
+`/usr/local/lib`, `/usr/local/lib64`, `/etc/ld.so.conf{,.d}` parsing, musl's
+`/etc/ld-musl-<arch>.path`, and non-x86-64/aarch64 triplets. See PROMPT.md §5.5.
+
+## No GPU?
+
+Every Tier 2/3 test runs on software rendering — Mesa **lavapipe** (Vulkan) and **llvmpipe** (GL)
+exercise the identical `dlopen` path. Upstream CI does the same. A missing GPU is not a reason to
+skip a test; only vendor-driver-specific behaviour (Tier 5) needs hardware.
 
 ## The musl case
 
@@ -51,7 +70,7 @@ so `RTLD_LAZY` cannot defer the problem.
 
 ```
 PROMPT.md                        full task prompt: evidence, designs, tests, tooling
-experiments/run.ps1              one-command evidence table (E1-E12)
+experiments/run.ps1              one-command evidence table (E1-E13)
 experiments/*.sh                 the three container stages
 elfsym.py                        dependency-free ELF64 reader
 gap.py                           symbol-gap driver (--fetch)
@@ -82,4 +101,9 @@ Removal is guarded four ways — an `eph-` prefix, an explicit protected list
   [pfalcon/foreign-dlopen](https://github.com/pfalcon/foreign-dlopen) — driving a foreign `ld.so`
   in-process. Requires a **libc-free** process, so not applicable to an AppImage.
 - [Anylinux-AppImages](https://github.com/Samueru-sama/Anylinux-AppImages) — `foreign-dlopen.c`,
-  the implementation this work targets.
+  the implementation this work targets. Its `quick-sharun.sh` already links a lot of tooling
+  (pathmap, uruntime, debloated packages, `hooks/`) — check there before writing anything new.
+- [VHSgunzo/sharun](https://github.com/VHSgunzo/sharun) — the launcher that assembles
+  `--library-path`; where the §5.5 discovery fix belongs.
+- [QaidVoid/onelf](https://github.com/QaidVoid/onelf) — single-binary packager whose
+  `bundle/gpu.rs` enumerates DRI/GBM/Vulkan ICD search paths; useful prior art for that path list.
