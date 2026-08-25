@@ -870,7 +870,8 @@ T5.3  SKIPPED - no aarch64 hardware. This machine is x86_64 (i7-12700H).
 **Measured:** every table and quoted output above, plus `experiments/run.ps1`
 (31/31), `experiments/appimage.ps1` (12/12 glibc, 11/11 musl with one named
 skip), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
-the corpus test, and the compiled-and-run sharun patch.
+and the corpus test. The sharun library-path fix is now upstream in
+Anylinux-sharun (54208d2) rather than carried as a patch here.
 
 **Assumed or UNVERIFIED:**
 

@@ -59,7 +59,7 @@ because a glibc-linked process cannot exec under musl's `ld.so`.
 | Exactly one libc family in the process | **Yes, on both hosts** | [`tests/invariants.c`](tests/invariants.c), E35 |
 | Generated shim is correct, not just compilable | **42 behavioural checks on real glibc 2.31** | [`tests/shim-selftest.c`](tests/shim-selftest.c), case E16 |
 | ELF rewriting is safe on hostile input | **Truncations and bit flips refused or bounded** | [`tests/elf-selftest.c`](tests/elf-selftest.c), case E14 |
-| Library-path completeness fix for sharun | **Patch written, compiled, run on 3 distros** | [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch) |
+| Library-path completeness fix for sharun | **Upstreamed** to Anylinux-sharun | [pkgforge-dev/Anylinux-sharun@54208d2](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537) |
 | Verdict on the two rejected designs | **Written, with evidence** | [`analysis/rejected-designs.md`](analysis/rejected-designs.md) |
 
 ## The blocker, and why it looked like an ABI problem
@@ -220,7 +220,6 @@ experiments/run.ps1                one command, the whole evidence table
 experiments/1x-3x.sh               the three container stages behind run.ps1
 experiments/appimage.ps1           the end-to-end proof on a real AppImage
 experiments/4x-*.sh                its stages: extract, build on the floor, two hosts
-patches/                           the sharun fix, to be upstreamed by hand
 scripts/wsl-ephemeral.ps1          throwaway WSL2 distros from any OCI image
 elfsym.py, gap.py                  dependency-free ELF reader and gap driver
 ```
@@ -327,6 +326,9 @@ make traps AUDIT_LIBC=/lib/x86_64-linux-gnu/libc.so.6
 - [Anylinux-AppImages](https://github.com/Samueru-sama/Anylinux-AppImages), the
   implementation this work targets.
 - [VHSgunzo/sharun](https://github.com/VHSgunzo/sharun), the launcher that
-  assembles `--library-path`, where the discovery fix belongs.
+  assembles `--library-path`.
+- [pkgforge-dev/Anylinux-sharun](https://github.com/pkgforge-dev/Anylinux-sharun),
+  the fork used by Anylinux-AppImages, where the library-path discovery fix now
+  lives ([54208d2](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537)).
 - [QaidVoid/onelf](https://github.com/QaidVoid/onelf), whose `bundle/gpu.rs`
   enumerates DRI/GBM/Vulkan ICD search paths.

@@ -201,7 +201,7 @@ chain with the commands.
 | Real GPU validation (`radv`/`anv`/`radeonsi`) | **not** "no GPU" -- this machine has a discrete NVIDIA RTX 3050 Ti and an Intel Iris Xe. There is no `/dev/dri`. WSL2 publishes no DRM render nodes, so these three cannot initialise however much silicon is present | needs a non-WSL Linux host, or 4.3 |
 | The proprietary-driver case | never tested against anything closed-source; every host driver measured so far is open-source Mesa. **Now possible here** -- see 4.3 | **the task for next session** |
 | aarch64 | no aarch64 hardware; this machine is x86_64 (i7-12700H). The code is arch-parameterised (`RS_LDSO`, `RS_TRIPLET`, syscall number fallbacks) but this is unverified | needs hardware |
-| Upstreaming the sharun patch | deliberately not done, it is a different repository | hand [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch) to the maintainer |
+| Upstreaming the sharun patch | **done** -- landed in Anylinux-sharun | [pkgforge-dev/Anylinux-sharun@54208d2](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537) |
 | Design R running a real GPU workload | the only end-to-end target is the musl case, where Design R correctly declines to switch | needs a newer-glibc host with a GPU |
 
 ### 4.3 THE TASK FOR NEXT SESSION: the hardware that is actually here
@@ -449,7 +449,7 @@ When something fails, report **which rung caught it**.
 - **Do not add library searching to `foreign-dlopen.c`.** Finding libraries is
   `ld.so`'s job, driven by `--library-path`, which sharun assembles. Two search
   implementations would diverge and the C one would be the buggy one. The fix
-  belongs in [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch).
+  belongs in sharun, and has landed there (Anylinux-sharun 54208d2).
 - **Regenerate the shim when the bundled glibc changes.**
   `make shim FLOOR=... TARGET=... MUSL=...`. A stale shim interposes over symbols
   libc now provides. `src/forward-shim-manifest.json` records the floor it

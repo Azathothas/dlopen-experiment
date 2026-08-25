@@ -201,5 +201,5 @@ Input to the sharun patch.
 | arch | yes | no | no | empty in the base image | present |
 
 `/usr/local/lib` exists on **all eight** and was absent from sharun's hardcoded
-list. That is the concrete bug E13b demonstrates, and what
-`patches/sharun-library-path.patch` fixes.
+list. That is the concrete bug E13b demonstrates. Fixed in Anylinux-sharun
+commit 54208d2.
