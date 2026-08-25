@@ -327,6 +327,41 @@ else
     run E26 OK "every trap in this libc is forwarded" \
         python3 /repo/tools/version_traps.py /lib/x86_64-linux-gnu/libc.so.6 \
                 --check /repo/src/version-compat.c --quiet
+
+    # ---- I. the failure report says the right thing ----------------------
+    #
+    # A DT_NEEDED that cannot be opened makes every symbol it would have
+    # provided look unresolved. The old report blamed the bundled glibc for
+    # all of them and pointed at ANYLINUX_RUNTIME=host, which cannot help --
+    # 258 LLVM symbols, none of which any libc has ever exported (issue #1).
+    echo
+    echo "-- I. diagnosing a dependency that could not be opened ----------"
+    cat > vendor.c <<'VEOF'
+__attribute__((visibility("default"))) int LLVMGetTargetFromTriple(void) { return 1; }
+__attribute__((visibility("default"))) int _ZN4llvm9Attribute16getWithAlignmentEv(void) { return 2; }
+VEOF
+    cat > user.c <<'UEOF'
+extern int LLVMGetTargetFromTriple(void);
+extern int _ZN4llvm9Attribute16getWithAlignmentEv(void);
+__attribute__((visibility("default")))
+int use(void) { return LLVMGetTargetFromTriple() + _ZN4llvm9Attribute16getWithAlignmentEv(); }
+UEOF
+    gcc -shared -fPIC -O2 vendor.c -o libvendor.so.1 -Wl,-soname,libvendor.so.1
+    gcc -shared -fPIC -O2 user.c -o hostdep.so -L"$PWD" -l:libvendor.so.1
+    mkdir -p gone && mv libvendor.so.1 gone/      # now unfindable, as on Gentoo
+
+    # E28: the report names the dependency instead of accusing the libc.
+    run E28 FAIL "dependencies could not be opened" \
+        env ANYLINUX_LIB_FOREIGN_DLOPEN=1 ANYLINUX_LIB_DEBUG=1 \
+            LD_PRELOAD=/work/foreign-dlopen.so ./loader /work/hostdep.so use
+
+    # E29: and the message the CALLER gets is still ld.so's, not one of the
+    #      report's own dlsym misses. Every failed probe replaces the pending
+    #      dlerror(), so without care the app is told this preload has an
+    #      undefined symbol -- the wrong object entirely.
+    run E29 FAIL "libvendor.so.1: cannot open shared object file" \
+        env ANYLINUX_LIB_FOREIGN_DLOPEN=1 ANYLINUX_LIB_DEBUG=1 \
+            LD_PRELOAD=/work/foreign-dlopen.so ./loader /work/hostdep.so use
 fi
 
 echo

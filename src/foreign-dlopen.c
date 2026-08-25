@@ -1183,10 +1183,24 @@ static void fgn_cache_put(const char *key, void *handle) {
 // Measured: without this, loading libvulkan_lvp.so "reported" 446 missing
 // symbols -- LLVMBuildAdd, drmIoctl, xcb_* -- every one of which its own
 // DT_NEEDED closure supplies. The diagnostic was louder than the bug.
+#define FGN_UNOPENED_MAX 8
 struct fgn_deps {
 	void *h[FGN_DEPS_MAX];
 	size_t n;
+	// DT_NEEDED entries that could not be opened at all. Recorded because a
+	// dependency that failed to load makes ALL of its symbols look unresolved,
+	// and the report then blames the bundled glibc for a couple of hundred
+	// LLVM symbols it never had anything to do with (issue #1).
+	char unopened[FGN_UNOPENED_MAX][64];
+	size_t n_unopened;
 };
+
+static void fgn_note_unopened(struct fgn_deps *deps, const char *soname) {
+	if (!deps || deps->n_unopened >= FGN_UNOPENED_MAX)
+		return;
+	snprintf(deps->unopened[deps->n_unopened], sizeof(deps->unopened[0]), "%s", soname);
+	deps->n_unopened++;
+}
 
 static int fgn_resolvable(const char *name, const struct fgn_deps *deps) {
 	// RTLD_DEFAULT walks the global scope, which includes this preload's own
@@ -1209,6 +1223,7 @@ static int fgn_report_unresolved(const struct fgn_elf *e, const char *what,
 		return -1;
 
 	int missing = 0;
+	int libc_shaped = 0;              // any unresolved name a libc could plausibly own
 	char names[FGN_REPORT_MAX][128];
 
 	for (size_t i = 0; i < e->dynsym_num; i++) {
@@ -1232,6 +1247,11 @@ static int fgn_report_unresolved(const struct fgn_elf *e, const char *what,
 		if (missing < FGN_REPORT_MAX) {
 			snprintf(names[missing], sizeof(names[0]), "%s", name);
 		}
+		// A C++ mangled name or an LLVM_* entry point is never something a
+		// libc provides, so a set made only of those cannot be explained by
+		// the bundled glibc being old.
+		if (strncmp(name, "_Z", 2) != 0 && strncmp(name, "LLVM", 4) != 0)
+			libc_shaped = 1;
 		missing++;
 	}
 
@@ -1245,10 +1265,41 @@ static int fgn_report_unresolved(const struct fgn_elf *e, const char *what,
 		if (missing > FGN_REPORT_MAX)
 			fprintf(stderr, " [foreign-dlopen.so] >>     ... and %d more\n",
 			        missing - FGN_REPORT_MAX);
-		fprintf(stderr,
-		        " [foreign-dlopen.so] >> Most likely the bundled glibc predates them. "
-		        "ANYLINUX_RUNTIME=host\n"
-		        " [foreign-dlopen.so] >> runs against the host's own libc, which will have them.\n\n");
+		// Say what is actually KNOWN before offering a guess. A dependency
+		// that failed to open explains every symbol it would have provided,
+		// and blaming the bundled glibc instead sends the reader to
+		// ANYLINUX_RUNTIME=host, which cannot help and costs an afternoon.
+		if (deps && deps->n_unopened) {
+			fprintf(stderr,
+			        " [foreign-dlopen.so] >> %zu of this object's own dependencies could not be "
+			        "opened:\n", deps->n_unopened);
+			for (size_t i = 0; i < deps->n_unopened; i++)
+				fprintf(stderr, " [foreign-dlopen.so] >>     %s\n", deps->unopened[i]);
+			fprintf(stderr,
+			        " [foreign-dlopen.so] >> The symbols above are most likely theirs, not the "
+			        "bundled libc's.\n"
+			        " [foreign-dlopen.so] >> Give the loader a path to them: distros that keep "
+			        "LLVM outside the\n"
+			        " [foreign-dlopen.so] >> standard libdirs (Gentoo /usr/lib/llvm/N/lib64, "
+			        "Debian /usr/lib/llvm-N/lib)\n"
+			        " [foreign-dlopen.so] >> reach them only through /etc/ld.so.cache, which a "
+			        "bundled ld.so does\n"
+			        " [foreign-dlopen.so] >> not read. SHARUN_EXTRA_LIBRARY_PATH is the usual "
+			        "way out.\n\n");
+		} else if (libc_shaped) {
+			fprintf(stderr,
+			        " [foreign-dlopen.so] >> Most likely the bundled glibc predates them. "
+			        "ANYLINUX_RUNTIME=host\n"
+			        " [foreign-dlopen.so] >> runs against the host's own libc, which will have them.\n\n");
+		} else {
+			fprintf(stderr,
+			        " [foreign-dlopen.so] >> Not one of these is a C symbol any libc exports, so "
+			        "the bundled\n"
+			        " [foreign-dlopen.so] >> glibc is not the problem and ANYLINUX_RUNTIME=host "
+			        "will not help.\n"
+			        " [foreign-dlopen.so] >> Something this object links against is missing from "
+			        "the search path.\n\n");
+		}
 	} else if (missing) {
 		DEBUG_PRINT("%s: %d unresolvable symbol(s), first is %s\n",
 		            what, missing, missing ? names[0] : "?");
@@ -1445,7 +1496,7 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 		}
 	}
 	int needs_strip = 0;
-	struct fgn_deps deps = { { NULL }, 0 };
+	struct fgn_deps deps = { 0 };   /* {0}: a field added later cannot be left uninitialised */
 
 	// closure first, even a satisfiable parent may pull in children
 	// that need stripping. The linker resolves glibc world dependencies
@@ -1504,13 +1555,21 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 		}
 		if (!candidate)
 			candidate = fgn_find_candidate(dep, depth);
-		if (!candidate)
+		if (!candidate) {
+			// Nothing opened it and nothing found it. Remember which soname
+			// that was: every symbol it would have provided is about to look
+			// unresolved, and the report has to say why rather than guess.
+			DEBUG_PRINT("foreign: dependency %s could not be opened at all\n", dep);
+			fgn_note_unopened(&deps, dep);
 			continue; // parent load below surfaces the classic error
+		}
 
 		char *dep_canon = canonicalize_file_name(candidate);
 		free(candidate);
-		if (!dep_canon)
+		if (!dep_canon) {
+			fgn_note_unopened(&deps, dep);
 			continue;
+		}
 		DEBUG_PRINT("foreign: loading dependency %s -> %s\n", dep, dep_canon);
 		if (is_host_library_path(dep_canon)) {
 			void *dh = fgn_load(dlopen_orig, dep_canon, flags, depth + 1);
@@ -1614,6 +1673,17 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 			const char *err = dlerror();
 			DEBUG_PRINT("foreign: plain fallback failed: %s\n", err ? err : "unknown");
 			fgn_report_unresolved(&e, canon, &deps, 1);
+			// The report probes with dlsym, and every probe that misses
+			// REPLACES the pending dlerror() message. The caller, who is about
+			// to ask for it, would get "foreign-dlopen.so: undefined symbol:
+			// ..." -- this object blamed for a failure in a different one --
+			// instead of ld.so's real explanation. Re-running the load puts
+			// the right message back. One extra failed dlopen, only in a trace
+			// run. Same class of bug as the destructive dlerror() upstream
+			// had, reached from the other side.
+			void *retry = dlopen_orig(canon, flags);
+			if (retry)
+				handle = retry;   // cannot happen; never leak a handle if it does
 		}
 	}
 
