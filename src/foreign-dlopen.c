@@ -547,6 +547,109 @@ static int fgn_requirements_satisfied(const struct fgn_elf *e) {
 	return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Which definition SHOULD an unversioned reference have reached?
+//
+// Stripping version tags -- and being musl-built, which amounts to the same
+// thing -- turns every reference into a plain name lookup, and for the handful
+// of symbols glibc still exports at an obsolete version that lookup does not
+// pick the default one. src/version-compat.c closes that by defining those
+// names itself and forwarding; this is how it learns what to forward TO.
+//
+// Answered from the defining file's own tables rather than from dlsym, because
+// dlsym does not agree with itself across releases: measured in E27,
+// dlsym(RTLD_NEXT, "pthread_cond_init") returns the OBSOLETE definition on
+// glibc 2.31 and the default one on 2.41. The ELF says the same thing on both.
+// ---------------------------------------------------------------------------
+
+// {version index -> name} from DT_VERDEF, resolved for one index at a time so
+// there is nothing to allocate.
+static const char *fgn_verdef_name(const struct fgn_elf *e, ElfW(Half) want) {
+	ElfW(Addr) vd_vaddr = 0;
+	if (!fgn_dyn_find(e, DT_VERDEF, &vd_vaddr) || !e->strtab)
+		return NULL;
+	size_t off = fgn_vaddr_to_offset(e, vd_vaddr);
+	if (off == (size_t)-1)
+		return NULL;
+
+	const char *base = e->map + off;
+	size_t pos = 0;
+	for (size_t guard = 0; guard < 4096; guard++) {
+		if (pos + sizeof(ElfW(Verdef)) > e->size - off)
+			break;
+		const ElfW(Verdef) *vd = (const ElfW(Verdef) *)(base + pos);
+		if (vd->vd_version != 1)
+			break;
+		if (vd->vd_ndx == want && vd->vd_aux) {
+			const ElfW(Verdaux) *aux = (const ElfW(Verdaux) *)((const char *)vd + vd->vd_aux);
+			if (fgn_valid_cstr(e, aux->vda_name))
+				return e->strtab + aux->vda_name;
+			return NULL;
+		}
+		if (!vd->vd_next)
+			break;
+		pos += vd->vd_next;
+	}
+	return NULL;
+}
+
+__attribute__((visibility("hidden")))
+int fgn_default_version_of(const char *sym, char *out, size_t outsz) {
+	if (!sym || !out || outsz == 0)
+		return 0;
+	out[0] = '\0';
+
+	// Any definition will do here; all we want from it is WHICH FILE defines
+	// the name. On glibc 2.31 this deliberately-imperfect lookup returns the
+	// obsolete definition, and that is fine: it lives in the same file.
+	void *any = dlsym(RTLD_NEXT, sym);
+	Dl_info info;
+	if (!any || !dladdr(any, &info) || !info.dli_fname)
+		return 0;
+
+	struct fgn_elf e;
+	if (!fgn_parse_elf(&e, info.dli_fname))
+		return 0;
+
+	int found = 0;
+	ElfW(Addr) versym_vaddr = 0;
+	size_t vs_off;
+	if (!e.dynsym || !e.strtab ||
+	    !fgn_dyn_find(&e, DT_VERSYM, &versym_vaddr) ||
+	    (vs_off = fgn_vaddr_to_offset(&e, versym_vaddr)) == (size_t)-1 ||
+	    vs_off + e.dynsym_num * sizeof(ElfW(Half)) > e.size)
+		goto done;
+
+	{
+		const ElfW(Half) *versym = (const ElfW(Half) *)(e.map + vs_off);
+		for (size_t i = 0; i < e.dynsym_num; i++) {
+			if (e.dynsym[i].st_shndx == SHN_UNDEF)
+				continue;
+			if (!fgn_valid_cstr(&e, e.dynsym[i].st_name))
+				continue;
+			if (strcmp(e.strtab + e.dynsym[i].st_name, sym) != 0)
+				continue;
+			// 0x8000 marks a NON-default (hidden) version. Skip those:
+			// exactly one entry per name is the default.
+			if (versym[i] & 0x8000)
+				continue;
+			ElfW(Half) ndx = versym[i] & 0x7fff;
+			if (ndx <= 1)
+				break;              // unversioned definition, nothing to name
+			const char *name = fgn_verdef_name(&e, ndx);
+			if (name) {
+				snprintf(out, outsz, "%s", name);
+				found = 1;
+			}
+			break;
+		}
+	}
+
+done:
+	fgn_free_elf(&e);
+	return found;
+}
+
 // references become plain name lookups, every tag must go together or
 // the orphaned remainder segfaults ld.so
 static void fgn_strip_versions(struct fgn_elf *e) {

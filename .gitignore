@@ -3,3 +3,5 @@ __pycache__/
 # build products
 src/foreign-dlopen.so
 src/runtime-select
+# ephemeral scratch
+.tmp/

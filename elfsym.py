@@ -91,10 +91,36 @@ class Elf:
         for i in range(n):
             st_name,st_info,st_other,st_shndx,st_value,st_size = struct.unpack_from('<IBBHQQ', self.d, symo+i*24)
             if st_name == 0: continue
-            out.append(dict(name=self._cstr(stro,st_name), bind=STB.get(st_info>>4,'?'),
+            out.append(dict(idx=i, name=self._cstr(stro,st_name), bind=STB.get(st_info>>4,'?'),
                             type=STT.get(st_info&0xf,'?'), shndx=st_shndx,
                             vis=st_other & 3, value=st_value))
         return out
+
+    def versym(self):
+        """DT_VERSYM as a list indexed by dynsym index, or None when absent.
+
+        Entry & 0x7fff is the version index; & 0x8000 marks a NON-DEFAULT
+        (hidden) definition.  Index 0 is local, 1 is global/unversioned."""
+        vs = self.dtag(0x6ffffff0)
+        if not vs: return None
+        o = self.v2o(vs[0])
+        if o is None: return None
+        _, n, _ = self._dynsym_span()
+        return list(struct.unpack_from(f'<{n}H', self.d, o))
+
+    def verdef_index(self):
+        """{version index: name} from DT_VERDEF, base entry included."""
+        vd = self.dtag(0x6ffffffc); num = self.dtag(0x6ffffffd)
+        if not vd: return {}
+        base = self.v2o(vd[0]); stro = self.v2o(self.dtag(5)[0]); res = {}
+        pos = 0
+        for _ in range(num[0] if num else 512):
+            ver,flags,ndx,cnt,hsh,aux,nxt = struct.unpack_from('<HHHHIII', self.d, base+pos)
+            nm, = struct.unpack_from('<I', self.d, base+pos+aux)
+            res[ndx] = self._cstr(stro,nm)
+            if not nxt: break
+            pos += nxt
+        return res
 
     def exports(self):
         return {s['name'] for s in self.symbols()

@@ -19,9 +19,21 @@ struct CreateInfo { uint32_t sType; const void *pNext; uint32_t flags;
                     uint32_t enabledLayerCount; const char *const *ppEnabledLayerNames;
                     uint32_t enabledExtensionCount; const char *const *ppEnabledExtensionNames; };
 struct Props { uint32_t apiVersion, driverVersion, vendorID, deviceID, deviceType;
-               char deviceName[256]; uint8_t uuid[16]; };
+               char deviceName[256]; uint8_t uuid[16];
+               /* VkPhysicalDeviceProperties continues with VkPhysicalDeviceLimits
+                * and VkPhysicalDeviceSparseProperties, 824 bytes in total for
+                * Vulkan 1.3. Nothing here reads them, but the DRIVER WRITES them,
+                * so the space has to exist. Without it the probe smashed its own
+                * stack on every SUCCESSFUL enumeration, which reads exactly like a
+                * driver crash and is not one. */
+               unsigned char tail[2048];
+               unsigned char guard[64]; };
 
 int main(void) {
+    /* Unbuffered: when something really does crash, the last line printed is
+       the whole diagnosis, and a pipe would swallow it. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     const char *loader = getenv("VKPROBE_LOADER");
     if (!loader) loader = "libvulkan.so.1";
 
@@ -61,7 +73,13 @@ int main(void) {
     if (r != 0) { printf("FAILED: second enumerate returned %d\n", r); return 1; }
     for (uint32_t i = 0; i < n && getprops; i++) {
         struct Props p; memset(&p, 0, sizeof p);
+        memset(p.guard, 0x5A, sizeof p.guard);
         getprops(devs[i], &p);
+        for (size_t g = 0; g < sizeof p.guard; g++)
+            if (p.guard[g] != 0x5A) {
+                printf("FAILED: driver wrote past VkPhysicalDeviceProperties\n");
+                return 1;
+            }
         printf("  device[%u]                 : %s\n", i, p.deviceName);
     }
     printf("OK: %u physical device(s)\n", n);

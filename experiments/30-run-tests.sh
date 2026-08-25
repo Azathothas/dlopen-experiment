@@ -277,6 +277,56 @@ else
     rm -rf goodhost && mkdir -p goodhost && cp -L /work/hostrt/* goodhost/ 2>/dev/null
     run E21 OK "runtime      : host" \
         env APPDIR="$PWD/app_old" ./runtime-select --probe --host-dir "$PWD/goodhost"
+
+    # ---- H. the version-binding trap, and the forwarders that close it ----
+    #
+    # T3.2 was blamed on glibc-vs-musl ABI differences for a long time. It is
+    # not that. Removing an object's version requirements is itself enough to
+    # break it, on ONE libc, with no musl and no Vulkan anywhere in the process.
+    echo
+    echo "-- H. the version-binding trap ----------------------------------"
+
+    gcc -shared -fPIC -O2 /repo/tests/verprobe.c -o verprobe.so -lpthread
+    python3 strip_ver.py verprobe.so verprobe_stripped.so
+
+    # E22: THE BUG. Same file, same libc, only the version tags removed, and
+    #      pthread_cond_init now returns EINVAL(22) instead of 0. Everything
+    #      users have reported as "the driver loads but nothing works" is this
+    #      number. If this ever reports 0 the trap is gone from this glibc and
+    #      E23 is measuring nothing -- which is why both sides are asserted.
+    run E22 OK "probe_cond_init()=22" ./loader /work/verprobe_stripped.so probe_cond_init
+
+    # E22b: the control. The very same object, unstripped, is fine -- so E22
+    #       cannot be blamed on the probe, the compiler or this container.
+    run E22b OK "probe_cond_init()=0" ./loader /work/verprobe.so probe_cond_init
+
+    # E23: THE FIX. The stripped object again, with the preload merely present.
+    #      ANYLINUX_LIB_FOREIGN_DLOPEN is deliberately NOT set: no dlopen
+    #      interception, no ELF rewriting, nothing but version-compat.c's
+    #      unversioned definitions sitting in the global lookup scope.
+    gcc -shared -fPIC -O2 -Wall -Wextra -Wno-format-truncation -I/repo/src \
+        /repo/src/foreign-dlopen.c /repo/src/forward-shim.c /repo/src/version-compat.c \
+        -o foreign-dlopen.so -ldl 2>/dev/null
+    run E23 OK "probe_cond_init()=0" \
+        env LD_PRELOAD=/work/foreign-dlopen.so ./loader /work/verprobe_stripped.so probe_cond_init
+
+    # E24: the trap stated in terms of libc alone -- the obsolete definition
+    #      really does reject the attribute Mesa passes.
+    # E25: the memcpy exclusion is justified, not assumed.
+    # E27: WHICH resolution primitive may be trusted. dlsym(RTLD_NEXT) answers
+    #      with the obsolete definition on glibc 2.31 and the default one on
+    #      2.41, which is exactly why version-compat.c reads the version name
+    #      out of the ELF and uses dlvsym.
+    gcc -O2 /repo/tests/vertrap.c -o vertrap -ldl -lpthread 2>/dev/null
+    run E24 OK "e24 PASSED" ./vertrap e24
+    run E25 OK "e25 PASSED" ./vertrap e25
+    run E27 OK "e27 PASSED" ./vertrap e27
+
+    # E26: the audit. A future glibc must not be able to add a trap that
+    #      version-compat.c neither forwards nor explicitly declines.
+    run E26 OK "every trap in this libc is forwarded" \
+        python3 /repo/tools/version_traps.py /lib/x86_64-linux-gnu/libc.so.6 \
+                --check /repo/src/version-compat.c --quiet
 fi
 
 echo

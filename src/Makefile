@@ -7,7 +7,8 @@
 # glibc 2.44.
 #
 #   make                      foreign-dlopen.so + runtime-select
-#   make shim FLOOR=... TARGET=...   regenerate forward-shim.c for another floor
+#   make shim FLOOR=... TARGET=... MUSL=...   regenerate forward-shim.c
+#   make traps AUDIT_LIBC=...  audit version-compat.c against a libc
 #   make clean
 
 CC      ?= cc
@@ -21,17 +22,29 @@ SOFLAGS  = -shared -fPIC
 ROOT     = ..
 FLOOR   ?= $(ROOT)/inventories/appdir.json
 TARGET  ?= $(ROOT)/inventories/glibc-2.44.json
+# The shipped forward-shim.c was generated WITH a musl inventory. Leaving it out
+# drops 33 of 35 definitions and silently disarms the entire musl bridge, so it
+# is a default here rather than something the caller has to remember (issue #1).
+MUSL    ?= $(ROOT)/inventories/musl-1.2.5.json
+# Whichever libc the trap audit runs against. Any glibc will do; the set only
+# grows with newer releases.
+AUDIT_LIBC ?= /lib/x86_64-linux-gnu/libc.so.6
 
 all: foreign-dlopen.so runtime-select
 
 # The preload carries the shim: it is already in the global lookup scope, so
 # its exports satisfy undefined symbols in anything dlopen'd later (E2, E5).
-foreign-dlopen.so: foreign-dlopen.c forward-shim.c
+foreign-dlopen.so: foreign-dlopen.c forward-shim.c version-compat.c
 	$(CC) $(SOFLAGS) $(CFLAGS) $^ -o $@ -ldl
 	@# 5.1's build check: exactly one exported definition, no accidental dupes.
-	@n=$$(nm -D --defined-only $@ 2>/dev/null | grep -cw atexit); \
-	 if [ "$$n" != "1" ]; then echo "FAIL: atexit exported $$n times, want 1"; exit 1; fi; \
-	 echo "ok: atexit exported exactly once"
+	@# atexit comes from the musl bridge, pthread_cond_init and realpath from
+	@# the version-trap forwarders. A collision between the two files, or a
+	@# generator that emitted a name twice, shows up here as 2.
+	@for s in atexit pthread_cond_init realpath; do \
+	   n=$$(nm -D --defined-only $@ 2>/dev/null | grep -cw $$s); \
+	   if [ "$$n" != "1" ]; then echo "FAIL: $$s exported $$n times, want 1"; exit 1; fi; \
+	 done; \
+	 echo "ok: atexit, pthread_cond_init, realpath each exported exactly once"
 
 runtime-select: runtime-select.c
 	$(CC) $(CFLAGS) $< -o $@ -ldl
@@ -40,10 +53,15 @@ runtime-select: runtime-select.c
 # treadmill becomes a build step instead of a per-bug-report patch.
 shim:
 	$(PYTHON) $(ROOT)/tools/gen_forward_shim.py \
-		--floor $(FLOOR) --target $(TARGET) \
+		--floor $(FLOOR) --target $(TARGET) --musl $(MUSL) \
 		--out forward-shim.c --manifest forward-shim-manifest.json
+
+# Does version-compat.c still cover every multi-version trap this libc has?
+# Run it against the NEWEST glibc you care about: the set only grows.
+traps:
+	$(PYTHON) $(ROOT)/tools/version_traps.py $(AUDIT_LIBC) --check version-compat.c
 
 clean:
 	rm -f foreign-dlopen.so runtime-select
 
-.PHONY: all shim clean
+.PHONY: all shim traps clean
