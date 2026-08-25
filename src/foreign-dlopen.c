@@ -1758,6 +1758,17 @@ static void *fgn_attempt(dlopen_func_t dlopen_orig, const char *filename, int fl
 	// the cache hands the same handle out to everyone
 	flags |= RTLD_NODELETE;
 
+	// The host closure must be mutually visible, exactly as it is natively:
+	// a driver's DT_NEEDED edge does not carry every symbol it relies on.
+	// Classic Mesa's DRI driver imports _glapi_* without any DT_NEEDED on
+	// libglapi.so.0 -- that symbol lives in the global scope in a normal
+	// process because libGL.so.1 pulled libglapi in as its own dependency.
+	// Loaded RTLD_LOCAL (the caller's usual flag) that linkage is invisible,
+	// and the driver fails with "undefined symbol: _glapi_tls_Dispatch".
+	// RTLD_GLOBAL here restores native visibility; bundled libs are already
+	// earlier in the global scope, so they keep winning any collision.
+	flags |= RTLD_GLOBAL;
+
 	void *result = fgn_load(dlopen_orig, canon, flags, 0);
 	free(canon);
 	return result;
