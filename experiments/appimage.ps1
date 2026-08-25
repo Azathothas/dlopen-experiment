@@ -70,7 +70,8 @@ function Invoke-In {
     param(
         [Parameter(Mandatory)][string]$Image,
         [Parameter(Mandatory)][string]$Script,
-        [switch]$Privileged
+        [switch]$Privileged,
+        [switch]$Gpu
     )
     $path = Join-Path $Here $Script
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing script: $path" }
@@ -85,6 +86,7 @@ function Invoke-In {
                   '-v', "${Repo}:/repo:ro",
                   '-v', "${Here}:/scripts:ro")
         if ($Privileged) { $args += '--privileged' }
+        if ($Gpu -and $script:GpuArgs) { $args += $script:GpuArgs }
         $args += @($Image, 'sh', "/scripts/$Script")
         & $engineExe @args 2>&1 | Out-Host
         $rc = $LASTEXITCODE
@@ -93,9 +95,42 @@ function Invoke-In {
     return $rc
 }
 
+<#
+    Is a GPU reachable from a container on this machine?
+
+    Asked by RUNNING it, not by inspecting the host. The engine may be a WSL2
+    VM (podman machine), a Linux daemon or a remote socket, and only the
+    container's own view of /dev/dxg and the bind-mounted vendor userspace
+    decides whether the E41-E46 cases can run. A machine with no GPU is a
+    supported configuration: those cases are then SKIPPED by name, never
+    silently omitted (section 7).
+#>
+function Resolve-GpuArgs {
+    $candidate = @('--device', '/dev/dxg', '-v', '/usr/lib/wsl:/usr/lib/wsl:ro')
+    # One flat array, splatted once. `& $exe @a 'x' 'y', 'z'` parses the comma
+    # list as a single array ARGUMENT, so the probe silently runs the wrong
+    # command line and reports no GPU on a machine that has one.
+    $probe = @('run', '--rm') + $candidate + @('alpine:3.22', 'sh', '-c',
+              'test -e /dev/dxg && test -f /usr/lib/wsl/lib/libcuda.so.1 && echo GPU-OK')
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $engineExe @probe 2>&1
+        $ok = ($LASTEXITCODE -eq 0) -and ("$out" -match 'GPU-OK')
+    }
+    catch { $ok = $false }
+    finally { $ErrorActionPreference = $prev }
+    if ($ok) {
+        Write-Host "GPU: /dev/dxg and the WSL vendor userspace are reachable" -ForegroundColor DarkGray
+        return $candidate
+    }
+    Write-Host "GPU: no /dev/dxg with a WSL vendor userspace; E41-E46 will be SKIPPED" -ForegroundColor DarkGray
+    return @()
+}
+
 $engineExe = Resolve-Engine
 Write-Host "engine: $engineExe" -ForegroundColor DarkGray
 New-Item -ItemType Directory -Force -Path $Work, (Join-Path $Work 'build') | Out-Null
+$script:GpuArgs = Resolve-GpuArgs
 
 # ---- the AppImage, fetched once and checksummed -------------------------
 $img = Join-Path $Work 'demo.AppImage'
@@ -118,16 +153,20 @@ if (-not (Test-Path -LiteralPath (Join-Path $Work 'AppDir'))) {
 $rc = Invoke-In -Image 'debian:bullseye-slim' -Script '42-build-floor.sh'
 if ($rc -ne 0) { throw "floor build failed (exit $rc)" }
 
+# ---- and the musl half of the ABI probe, which only Alpine can produce ---
+$rc = Invoke-In -Image 'alpine:3.22' -Script '45-build-musl-guest.sh'
+if ($rc -ne 0) { throw "musl guest build failed (exit $rc)" }
+
 $fail = 0
 if ($Only -in @('both', 'alpine')) {
     Write-Host ""
     Write-Host "######## musl host: the case the complaint is about ########" -ForegroundColor Yellow
-    if ((Invoke-In -Image 'alpine:3.22' -Script '43-host-alpine.sh') -ne 0) { $fail++ }
+    if ((Invoke-In -Image 'alpine:3.22' -Script '43-host-alpine.sh' -Gpu) -ne 0) { $fail++ }
 }
 if ($Only -in @('both', 'debian')) {
     Write-Host ""
     Write-Host "######## glibc host: the regression case ########" -ForegroundColor Yellow
-    if ((Invoke-In -Image 'debian:trixie-slim' -Script '44-host-debian.sh') -ne 0) { $fail++ }
+    if ((Invoke-In -Image 'debian:trixie-slim' -Script '44-host-debian.sh' -Gpu) -ne 0) { $fail++ }
 }
 
 Write-Host ""

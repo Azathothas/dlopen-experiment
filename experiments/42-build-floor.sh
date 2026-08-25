@@ -13,7 +13,12 @@ cp /repo/elfsym.py /build/ 2>/dev/null || true
 make 2>&1 | tail -3
 mkdir -p /w/build
 cp foreign-dlopen.so runtime-select /w/build/
-for t in icd-harness vkprobe corpus invariants soak; do
+for t in icd-harness vkprobe corpus invariants soak cudaprobe bindprobe; do
     gcc -O2 -o /w/build/$t /repo/tests/$t.c -ldl
 done
+# The cross-libc ABI probe: the driver, and the SAME-libc guest that is its
+# control. -I so both find abi-abi.h, which carries the shared view struct and
+# the one filler both sides are compiled from.
+gcc -O2 -I/repo/tests -o /w/build/abi-host /repo/tests/abi-host.c -ldl -lpthread
+gcc -shared -fPIC -O2 -Wl,-z,now -I/repo/tests /repo/tests/abi-guest.c     -o /w/build/libabi_glibc.so -lpthread
 echo "floor build ok. preload needs at most: $(objdump -T foreign-dlopen.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"

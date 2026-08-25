@@ -12,4 +12,12 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./demo.AppImage --appimage-extract >/dev/null 2>&1 ||
 [ -d AppDir ] || { echo "extraction produced no AppDir"; exit 1; }
 # Keep upstream's shim beside ours so the A/B can switch between them.
 cp AppDir/lib/foreign-dlopen.so AppDir/lib/foreign-dlopen.upstream.so
-echo "AppDir: $(ls AppDir/lib | wc -l) libraries, bundled glibc $(strings AppDir/lib/libc.so.6 2>/dev/null | sed -n 's/.*stable release version \([0-9.]*\)\..*/\1/p' | head -1)"
+
+# The bundled glibc version, out of libc's own banner. grep -a rather than
+# `strings`, which is in binutils and is not installed here: the version this
+# whole report is written against printed as an empty string for as long as
+# that went unnoticed, which is the quietest possible way to be wrong.
+BUNDLED=$(grep -ao 'release version [0-9.]*' AppDir/lib/libc.so.6 2>/dev/null |
+          head -1 | awk '{print $3}' | sed 's/\.$//')
+echo "AppDir: $(ls AppDir/lib | wc -l) libraries, bundled glibc ${BUNDLED:-UNREADABLE}"
+[ -n "$BUNDLED" ] || echo "  warning: could not read the bundled glibc version from libc.so.6"

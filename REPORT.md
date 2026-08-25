@@ -13,11 +13,14 @@ Every claim is either backed by a command whose output is quoted, or labelled
 |---|---|
 | A host GPU driver built against a **newer glibc** loads into a process carrying an older bundled glibc | **Achieved.** Two mechanisms: the generated shim (E5) and the host-runtime switch (E12, no shim at all). The selector picks correctly on 8 of 8 distros |
 | A **musl-built** host driver loads into that same glibc process **and renders** | **Achieved.** On Alpine 3.22, the demo AppImage's bundled glibc 2.44 drives Alpine's musl-built lavapipe: `vkEnumeratePhysicalDevices` returns one device and `vkcube` renders (E32, E37). Exactly one libc family is mapped (E35). 60 s of continuous rendering with RSS, fds and threads flat. See section 6 |
+| A **closed-source** host driver does the same, on real silicon | **Achieved, and it never needed the fix.** NVIDIA's `libcuda.so.1` loads under the bundled glibc on Alpine and round-trips 4096 bytes through an RTX 3050 Ti (E41) -- and so does the control, because a vendor ships against a `GLIBC_2.2.5` floor on purpose. What the vendor stack DID need is uniform version binding (E43a/E43). Section 7.1 |
+| Rendering on an actual GPU rather than a software rasteriser | **Achieved for OpenGL.** `GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Ti Laptop GPU)` at 101-121 FPS through the AppImage with no file changed (E53), via Mesa's d3d12 Gallium driver, which needs no DRM render node. Vulkan is still lavapipe: `dzn` is not packaged. Section 7.5 |
+| The cross-libc ABI microtests, T1.3-T1.7 | **Written and passing.** 26 crossings hold with a musl guest; of the six struct hazards, two are live and named and four are benign, measured rather than assumed. Section 7.4 |
 
 | Completion criterion | Status |
 |---|---|
 | Both goals demonstrated by a test that fails before and passes after | **Yes.** Goal 1: E5, E12. Goal 2: E22/E23 for the mechanism, E30/E32 and E37a/E37 for the end-to-end |
-| The evidence harness still reports all predictions held | **Yes, 31/31**, up from 22/22, with 9 new cases. The AppImage suite adds 12 on a glibc host and 11 on a musl host |
+| The evidence harness still reports all predictions held | **Yes, 31/31**, up from 22/22, with 9 new cases. The AppImage suite adds 31 on a glibc host and 25 on a musl host, with every unrunnable case SKIPPED by the capability it lacks |
 | No host file modified, verified by checksum | **Yes.** T4.3, identical sha256 before and after |
 | Bundled libraries still win, verified via `dladdr` | **Yes.** T4.2, all resolved under `$APPDIR` |
 | A forward-compatibility story that does not depend on foresight | **Yes.** Host-runtime selection for the unenumerable gap, a generated shim for the enumerable one, and a build-time audit (E26) for the version traps |
@@ -33,8 +36,10 @@ Vulkan anywhere in the process. Section 6.2 is the measurement.
 
 ## 2. Environment reached
 
-**Highest tier reached: Tier 3**, end-to-end AppImage under `xvfb` with
-software Vulkan. All Tier 4 invariants run. Tier 5 is skipped: no discrete GPU.
+**Highest tier reached: Tier 5**, on hardware, for OpenGL and for compute. All
+Tier 4 invariants run. Tier 3 end-to-end runs under `xvfb` with software Vulkan,
+and Vulkan is the one path with no hardware result: Mesa's Vulkan-on-D3D12
+driver is not packaged (section 7.5).
 
 ```
 $ uname -srm                     # inside every test container
@@ -55,10 +60,18 @@ Python 3.13                      (host, for the Tier-0 tooling)
 | `opensuse/tumbleweed` | glibc 2.43 | selector matrix |
 | `archlinux:latest` | glibc 2.44 | selector matrix, newest released glibc |
 
-Software rendering was used throughout and is named in every result: Mesa
-**lavapipe** and **llvmpipe** (LLVM 20.1.8, 256 bits), pinned with
+Software rendering is used for every Vulkan result and is named in each one:
+Mesa **lavapipe** and **llvmpipe** (LLVM 20.1.8, 256 bits), pinned with
 `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` so a half-working
 host GPU could not silently take over.
+
+Two GPUs are reachable and are used where a case says so: an NVIDIA GeForce
+RTX 3050 Ti Laptop and an Intel Iris Xe, both through `/dev/dxg`
+paravirtualisation with the vendor userspace bind-mounted from
+`/usr/lib/wsl`. There is no `/dev/dri` on this machine at all, so `radv`, `anv`
+and `radeonsi` cannot initialise; `d3d12` and CUDA do not need one. Cases that
+require the device are SKIPPED with that capability named on a machine without
+it, and the suite still passes.
 
 The host driver is sane natively, so every downstream result is interpretable:
 
@@ -673,7 +686,416 @@ supply a file the distribution does not ship.
 
 ---
 
-## 7. Test results
+## 7. The closed-source driver, the ABI, and real silicon
+
+Three things this report carried as UNVERIFIED for its whole life are measured
+here: a **proprietary** host driver, the **cross-libc ABI** microtests T1.3-T1.7,
+and rendering on an actual **GPU**. Cases E41-E53 in
+[`experiments/40-appimage.sh`](experiments/40-appimage.sh); the suite reports
+them on both hosts and SKIPS them by name where the capability is absent.
+
+The headline is not the one the task predicted, so it goes first.
+
+### 7.1 A proprietary driver is the least likely library to need this fix
+
+The target is NVIDIA's WSL CUDA userspace, reachable through `/dev/dxg`. It is
+the one class of host library nothing else here covers: a vendor binary that
+cannot be inspected, cannot be rebuilt, and was linked against a libc nobody in
+this project chose.
+
+It loads, and it works:
+
+```
+E41   handle          : 0x55557363f2d0
+      provenance      : /usr/lib/wsl/lib/libcuda.so.1
+      cuInit          : ok
+      driver version  : 13.0
+      devices         : 1
+      device[0]       : NVIDIA GeForce RTX 3050 Ti Laptop GPU
+      device memory   : 4095 MiB
+      OK: 1 CUDA device(s), 4096 bytes round-tripped through the GPU and verified
+```
+
+The round trip is deliberate. A handle proves only that `ld.so` was satisfied;
+`cuMemcpyHtoD` and `cuMemcpyDtoH` with a byte-for-byte compare exercise ioctls
+on the device node, the vendor's own threading and its allocator, under a libc
+runtime the vendor never saw, and none of them fails.
+
+**And every control passes too.** E41b runs the identical command with
+`ANYLINUX_LIB_FOREIGN_DLOPEN=0`; E41c runs it with **no preload in the process
+at all**, so neither this repository's shim nor upstream's nor the version-trap
+forwarders are present; E43a runs the shipped one. All four get the same result.
+That is not a defect in the test, it is the answer:
+
+```
+$ objdump -T /usr/lib/wsl/lib/libcuda.so.1 | grep -o 'GLIBC_[0-9.]*' | sort -uV
+GLIBC_2.2.5
+```
+
+A vendor ships against the oldest floor it can, precisely so its blob runs on
+everything. Nothing in it can be missing from a bundled glibc 2.44, so the shim
+has nothing to do, and E42 measures that directly: **0 objects rewritten, 3
+examined and left unchanged** -- the E39 rule arriving from a real vendor binary
+instead of a synthetic probe. The claim E41/E41b support is therefore the
+*regression* claim: turning the feature on does not break a driver that already
+worked.
+
+E46 puts the vendor's own binary on the end of it. `nvidia-smi` is NVIDIA's, not
+ours; it `dlopen`s `libnvidia-ml.so.1` itself, and under the AppImage's bundled
+glibc on **Alpine** it reports the GPU. E46a is its control, and on a musl host
+it is unambiguous: the same binary run without the AppImage's runtime does not
+execute at all. The precise reason is worth stating, because the obvious phrasing
+is wrong -- musl's `ld.so` is never asked. The binary's `PT_INTERP` names
+`/lib64/ld-linux-x86-64.so.2`, Alpine has no such file, and the kernel fails the
+`execve` with ENOENT before any loader runs. E46a requires that message NOT to be
+a shared-library one, so the case cannot pass on E44's failure by mistake.
+
+```
+E46    GPU 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU (UUID: GPU-df849629-...)
+E46a   env: can't execute '/usr/lib/wsl/lib/nvidia-smi': No such file or directory
+```
+
+### 7.2 What the vendor stack did need: two condvar ABIs in one process
+
+Section 6.2 established the version-binding trap from libc alone. The CUDA stack
+is the first place it has been caught in **shipping third-party software**, and
+it is caught by reading the answer out of the running process rather than
+inferring it. [`tests/bindprobe.c`](tests/bindprobe.c) walks each loaded object's
+relocations, reads the address the loader put in the slot, and names the file and
+symbol version behind it. `LD_DEBUG=bindings` cannot do this: it prints the
+version a reference *asked for*, and for this trap the whole point is that the
+reference asks for nothing.
+
+Microsoft's `libdxcore.so`, which `libcuda.so.1` loads to reach `/dev/dxg`,
+carries no symbol versioning at all:
+
+```
+$ readelf -V /usr/lib/wsl/lib/libdxcore.so | grep -c 'Version needs'
+0
+$ readelf -V /usr/lib/wsl/lib/libd3d12.so  | grep -c 'Version needs'
+0
+$ readelf -V /usr/lib/wsl/lib/libcuda.so.1 | grep -c 'Version needs'
+1
+```
+
+So it imports every libc symbol unversioned -- structurally identical to a
+musl-built object, and to an object this project's own rewriter has stripped.
+`libd3d12.so` is the same shape and is in the *graphics* stack rather than this
+one (section 7.5); it is shown here only because two independent vendor blobs
+being built this way is the point.
+
+[`tools/trap_users.py`](tools/trap_users.py) intersects an object's imports with
+the traps of the libc it will resolve against:
+
+```
+$ python3 tools/trap_users.py $APPDIR/lib/libc.so.6 /usr/lib/wsl/lib/libdxcore.so
+libc .../libc.so.6: 38 trap(s), 191 benign re-versioning(s)
+
+== libdxcore.so
+   imports              : 140
+   trapped names among them: 6
+   symbol versioning    : ABSENT, so every one of those references is unversioned
+                          and binds the OBSOLETE definition
+     memcpy                     default=GLIBC_2.14   obsolete=GLIBC_2.2.5
+     pthread_cond_broadcast     default=GLIBC_2.3.2  obsolete=GLIBC_2.2.5
+     pthread_cond_destroy       default=GLIBC_2.3.2  obsolete=GLIBC_2.2.5
+     pthread_cond_signal        default=GLIBC_2.3.2  obsolete=GLIBC_2.2.5
+     pthread_cond_timedwait     default=GLIBC_2.3.2  obsolete=GLIBC_2.2.5
+     pthread_cond_wait          default=GLIBC_2.3.2  obsolete=GLIBC_2.2.5
+```
+
+NVIDIA's own `libnvidia-ml.so.1` names ten trapped symbols and is versioned, so
+every one of them binds correctly. Which object is at risk is decided by how it
+was linked, not by who wrote it.
+
+The consequence, measured with the AppImage exactly as it ships (E43a):
+
+```
+  pthread_cond_wait
+      libdxcore.so                 -> libc.so.6 @GLIBC_2.2.5
+      libcuda.so.1.1               -> libc.so.6 @GLIBC_2.3.2
+      VERDICT: MIXED (2 implementations)
+
+  BINDINGS MIXED: 6 symbol(s) measured, 5 MIXED
+```
+
+One process, one driver stack, two different implementations of five condition
+variable entry points -- and the two differ in how they read the first eight
+bytes of a `pthread_cond_t`, which is the 2003 ABI change section 6.2 is about.
+With this repository's preload the same measurement is (E43):
+
+```
+      libdxcore.so                 -> foreign-dlopen.so+0x6c80
+      libcuda.so.1.1               -> foreign-dlopen.so+0x6c80
+      VERDICT: uniform
+
+  BINDINGS UNIFORM: 6 symbol(s) measured, 0 MIXED
+```
+
+**What this does not claim.** The mixed binding is latent, not currently fatal:
+`cuInit` returns 0 and the GPU round trip succeeds in both states. Whether a
+`pthread_cond_t` ever crosses the `libdxcore`/`libcuda` boundary is not visible
+from outside two closed-source blobs. If one ever does, the two sides read it
+two different ways. The fix removes the question rather than answering it.
+
+### 7.3 One blind spot, three sightings
+
+The `/etc/ld.so.cache` item has been an open design question since the first
+pass. It now has a symptom, from a real driver, three times over.
+
+WSL makes its GPU userspace reachable by writing a file:
+
+```
+$ cat //wsl$/podman-machine-default/etc/ld.so.conf.d/ld.wsl.conf   # a real WSL distro
+# This file was automatically generated by WSL. To stop automatic generation of this file, add the following entry to /etc/wsl.conf:
+# [automount]
+# ldconfig = false
+/usr/lib/wsl/lib
+```
+
+Nothing else names that directory. Anylinux patches `ld-linux.so` to skip the
+cache (E13b), so `--library-path` is the only discovery mechanism left, and
+whatever assembles it decides what exists.
+
+**Sighting one, compute (E44).** `libcuda.so.1` opens by absolute path and loads
+fine. Inside `cuInit` it `dlopen`s `libdxcore.so` by **bare soname**, which
+`foreign-dlopen` deliberately never intercepts, so it reaches `ld.so` and is not
+found. The error the user sees is not "cannot open shared object file":
+
+```
+FAILED: cuInit -> 100          # CUDA_ERROR_NO_DEVICE
+```
+
+E45 appends the directories `/etc/ld.so.conf` names and the same command
+completes the GPU round trip. The conf file is plain text, so reading it gets the
+benefit of the cache without touching the binary cache whose parsing is why the
+cache was inhibited.
+
+**Sighting two, Design R.** `runtime-select` assembles its own
+`--library-path` from a hardcoded `rs_host_libdirs[]`, which has the same blind
+spot. This one was found by reading the list rather than by a failure, so it was
+measured afterwards, building the file from the commit before the change and
+after it against the same driver:
+
+```
+=== runtime-select, before the conf-dirs change ===
+   directories on the path: 8
+   /usr/lib/wsl/lib present: NO
+   FAILED: cuInit -> 304 CUDA_ERROR_OPERATING_SYSTEM
+=== runtime-select, after the conf-dirs change ===
+   directories on the path: 10
+   /usr/lib/wsl/lib present: yes
+   OK: 1 CUDA device(s), 4096 bytes round-tripped through the GPU and verified
+```
+
+A **third** distinct symptom for one cause, and again not a missing library: 304
+rather than E44's 100, because the process is running the host's glibc 2.41
+rather than the bundled 2.44 and `libcuda` gives up at a different point. The fix
+is `rs_conf_dirs()`, which reads `/etc/ld.so.conf`, follows its `include` globs
+with recursion bounded by both depth and a total file budget, sorts each
+directory's entries so the path is reproducible, and appends what it finds
+**after** the hardcoded list, so bundled and host-runtime directories keep their
+existing precedence. E52 is the after-state as a standing case; the before-state
+above is a one-off, because keeping it would mean shipping a switch that exists
+only to turn a bug back on.
+
+**Sighting three, graphics (E53a).** The strongest one, because the symptom
+implicates the wrong subsystem entirely. Mesa's `d3d12_dri.so` `dlopen`s
+`libd3d12.so` by bare soname; sharun assembles the path; sharun's host-GPU
+directory list is hardcoded and contains `/run/opengl-driver/lib` and
+`/run/current-system/sw/lib` but not `/usr/lib/wsl/lib`. What the user sees:
+
+```
+Error: glXCreateContext failed
+```
+
+That reads as a display or driver fault. It is a missing directory. `LD_DEBUG=libs`
+is what settles it:
+
+```
+897:  find library=libd3d12.so [0]; searching
+897:    trying file=/w/AppDir/lib/libd3d12.so
+897:    trying file=/usr/lib/x86_64-linux-gnu/libd3d12.so
+897:    trying file=/run/opengl-driver/lib/libd3d12.so
+897:    trying file=/run/current-system/sw/lib/libd3d12.so
+                                               ... and never /usr/lib/wsl/lib
+```
+
+E53 hands sharun the conf-derived directories through its own
+`SHARUN_FALLBACK_LIBRARY_PATH` -- no file edited, nothing patched -- and the
+AppImage renders on the GPU. All three sightings are one computation, and it is
+the one [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch)
+already implements.
+
+### 7.4 The cross-libc ABI, measured
+
+T1.3 through T1.7 were SKIPPED and UNVERIFIED for the whole project. They are
+written now: [`tests/abi-guest.c`](tests/abi-guest.c) is one source file built
+twice, by glibc on the floor and by musl on Alpine, and
+[`tests/abi-host.c`](tests/abi-host.c) drives the crossings. The size table both
+sides fill comes from one inline function in
+[`tests/abi-abi.h`](tests/abi-abi.h) compiled into both, so the two columns can
+differ only because the headers do.
+
+The musl build is loaded **through `foreign-dlopen` itself**, which is what drops
+its libc edge -- no `patchelf`, no stand-in. E48 is the control that fails:
+
+```
+E48   FAILED: dlopen: libc.musl-x86_64.so.1: cannot open shared object file
+E49   ABI CROSSING PASSED: 26 checks, 0 failed
+E47   ABI CROSSING PASSED: 27 checks, 0 failed        (same-libc control)
+```
+
+Every crossing holds. Memory allocated in the musl object is freed by the
+process and the reverse; an `errno` set inside it is read outside it in the same
+thread; a `FILE*` opened by the process is written from inside it and read back;
+a mutex made on either side is locked from the other; and a condition variable
+the process waits on is signalled from inside it. Both sides reach one `malloc`,
+one `free`, one `__errno_location`, one `pthread_mutex_lock` and one `stdout`
+FILE object.
+
+**The size divergences are real and mostly harmless, and the report can finally
+say which.** A size table alone cannot tell those apart, so the probe measures
+offsets too:
+
+```
+    regmatch_t             guest=16       host=8        <-- DIVERGES
+    struct rusage          guest=272      host=144      <-- DIVERGES
+    struct sched_param     guest=48       host=4        <-- DIVERGES
+    ucontext_t             guest=936      host=968      <-- DIVERGES
+    FTW_D                  guest=2        host=1        <-- DIVERGES   (all seven)
+    O_LARGEFILE            guest=32768    host=0        <-- DIVERGES
+    sizeof regoff_t        guest=8        host=4        <-- DIVERGES
+    off rusage.ru_maxrss   guest=32       host=32
+    off rusage.ru_nivcsw   guest=136      host=136
+    off stat.st_mode       guest=24       host=24
+    off stat.st_size       guest=48       host=48
+    off dirent.d_name      guest=19       host=19
+    off sched.priority     guest=0        host=0
+```
+
+Every field the probe measures is at the same offset in both. `struct rusage`
+differs by 128 bytes of trailing reserved space and `struct sched_param` by 44;
+neither moves a field anybody reads.
+
+Which leaves the direction that does break, and it is not the one the hazard list
+implied. Handing the guest storage the host allocated is safe, because the guest
+calls **glibc's** implementation, which writes glibc's layout into glibc-sized
+memory: all four guard bands survive (T1.7b). The hazard is one step further on,
+where the guest reads a glibc-filled struct back at its **own** offsets:
+
+```
+  T1.7c -- the guest reading back a struct glibc filled
+    DIFF regexec, read back at own stride     host=7 guest=12884901888
+         LIVE HAZARD: regoff_t is 4 bytes here and 8 there
+    same getrusage, read back at own offset   host=6084 guest=6084
+    DIFF nftw, dirs counted with own FTW_D    host=2 guest=0
+         LIVE HAZARD: FTW_D is 1 here and 2 there
+```
+
+Nothing crashes. `regexec` reports a match ending at byte 7 and the musl-built
+caller reads 12884901888 out of the same array; `nftw` walks a tree with two
+directories in it and the musl-built caller counts none.
+
+Six hazards were listed. They do not all end in the same place, and the
+difference between measured and argued is worth keeping:
+
+| Hazard | Verdict | On what basis |
+|---|---|---|
+| `regmatch_t` / `regoff_t` stride | **LIVE** | measured: host reads 7, guest reads 12884901888 from the same array |
+| the seven `FTW_*` values | **LIVE** | measured: host counts 2 directories, guest counts 0 |
+| `struct rusage` | benign | measured: sizes differ by 128 bytes of trailing reserve, `ru_maxrss` and `ru_nivcsw` are at the same offsets, and the guest reads the same value the host does |
+| `struct sched_param` | benign | measured: `sched_priority` is at offset 0 in both, and the guard band around a host-allocated one survives the guest filling it |
+| `ucontext_t` | **argued, not measured** | 936 vs 968 bytes, and nothing here calls `getcontext`/`swapcontext` across the boundary, so no crossing exists to measure. It would matter to a guest that made or swapped a context the process also touched |
+| `O_LARGEFILE` | **argued, not measured** | 0 on glibc x86-64, `0100000` on musl. A guest passing musl's value to glibc's `open` sets the kernel flag glibc considers implied on 64-bit, which is a no-op there; that is a reading of the two headers, not a test |
+
+E50 asserts the count of LIVE rows, so it fails if a future libc moves one.
+
+No loader shim can fix the live two: an offset compiled into an object is not
+something a preload can reach. They are a property of loading musl-built code
+into a glibc process, and the honest statement is now four measured verdicts and
+two arguments rather than a worry about six.
+
+### 7.5 Hardware, at last, and the caveat that was wrong twice
+
+"No GPU" was the standing caveat of this whole project. It was wrong the first
+time (there are two GPUs, and the NVIDIA one is live from Linux) and wrong again
+in its correction (`/dev/dri` is absent, so radv/anv/radeonsi are out -- but they
+are not the only way to reach a GPU).
+
+Mesa's **d3d12 Gallium driver** does not need a DRM render node. It talks to
+`/dev/dxg` through Microsoft's `libdxcore`, and Debian packages it:
+`/usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so`. That makes the host's own OpenGL
+driver a hardware driver, and the AppImage's bundled libglvnd finally has a real
+vendor library to drive.
+
+Rung 1 of the diagnostic ladder first, natively, with no AppImage involved:
+
+```
+$ GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA \
+  xvfb-run -a -s '-screen 0 1024x768x24 +extension GLX +render' glxgears -info
+GL_RENDERER   = D3D12 (NVIDIA GeForce RTX 3050 Ti Laptop GPU)
+GL_VERSION    = 4.6 (Compatibility Profile) Mesa 25.0.7-2+deb13u1
+GL_VENDOR     = Microsoft Corporation
+579 frames in 5.0 seconds = 115.707 FPS
+```
+
+Then through the AppImage, which is 7.3's third sighting and its resolution:
+
+```
+E53a  Error: glXCreateContext failed                                (as it stands)
+E53   GL_RENDERER   = D3D12 (NVIDIA GeForce RTX 3050 Ti Laptop GPU)  (+ conf dirs)
+      606 frames in 5.0 seconds = 120.965 FPS
+      507 frames in 5.0 seconds = 101.138 FPS      (the next interval)
+```
+
+**No file is modified and nothing is patched, but four environment variables
+are set**: `SHARUN_FALLBACK_LIBRARY_PATH` with the directories `/etc/ld.so.conf`
+names, and `GALLIUM_DRIVER`, `MESA_D3D12_DEFAULT_ADAPTER_NAME` and
+`LIBGL_ALWAYS_SOFTWARE=0` to choose the hardware driver and which of the two
+GPUs it drives. E40 remains the case that forces nothing; this one is not that
+case and does not claim to be. The first of those four is the only one this
+project is responsible for, and it is the one the sharun patch removes the need
+for.
+
+**E53b does not flip.** With the feature off the same command still renders, and
+saying otherwise would be claiming a control that did not happen. The host GL
+stack here is glibc-built against glibc 2.41, older than the bundled 2.44, so
+there is nothing for the shim to do -- the same reason as E41b and E42. What E53
+measures is that the path works on hardware, not that the shim made it work.
+
+Vulkan stays on lavapipe. Mesa's Vulkan-on-D3D12 driver (`dzn`) is not packaged
+by Debian, and building it is the one remaining route to a hardware-backed
+**Vulkan** ICD.
+
+### 7.6 Design R, with a device on the end
+
+Design R selected correctly on eight distros and passed its self-test, and had
+never had a driver on the end of the choice. E51 and E52 put one there. Read the
+first three rows together: they run the **same** host Vulkan ICD and differ only
+in how the process got a libc that can satisfy it.
+
+| Case | Runtime | Feature | Driver | Result |
+|---|---|---|---|---|
+| E31 | bundled | off | host lavapipe | no devices |
+| E32 | bundled | on | host lavapipe | 1 device (the shim half) |
+| E51 | **host** | none at all | host lavapipe | 1 device (the Design R half) |
+| E52 | **host** | none at all | NVIDIA `libcuda.so.1` | the round trip, on the RTX 3050 Ti |
+
+The switch is forced with `ANYLINUX_RUNTIME=host`. Auto declines on this host
+and is right to: the bundled glibc 2.44 is newer than the host's 2.41, so a
+switch could only lose, and that is the rule E17 measures. What E51 and E52
+measure is whether the switched runtime can drive a real device, not whether it
+should have been chosen.
+
+The two halves of the design are now each demonstrated end to end, on the same
+host, against the same driver, and they remain independent: on a musl host only
+the shim half exists, which is why the musl row of the matrix has no escape
+hatch (risk 4).
+
+---
+
+## 8. Test results
 
 Tests are grouped by what they need to run. Tier 0 is static analysis on any
 OS. Tier 1 is the evidence table. Tier 2 needs a real driver but no GPU. Tier 3
@@ -720,13 +1142,20 @@ the version-binding trap and the reporting defects:
 ### Tier 1b, the AppImage end-to-end suite
 
 `experiments/appimage.ps1` runs a real AppImage against a real host driver on
-two hosts and reports **12/12 on glibc** and **11/11 with one skip on musl**.
-It fetches the demo AppImage once (sha256 verified), extracts it in a container
-because the payload is DwarFS, builds `src/` on the glibc 2.31 floor, and then
-measures E30 through E39 on each host. Every case is run with the feature off
-and on, and against both the shipped `foreign-dlopen.so` and the one built from
-`src/`, because a one-sided result cannot tell a working fix from a fallback
-that was already happening.
+two hosts and reports **31/31 on glibc** and **25/25 with six named skips on
+musl**. It fetches the demo AppImage once (sha256 verified), extracts it in a
+container because the payload is DwarFS, builds `src/` on the glibc 2.31 floor,
+builds the musl half of the ABI probe on Alpine, and then measures E30 through
+E53 on each host. Every case is run with the feature off and on, and against
+both the shipped `foreign-dlopen.so` and the one built from `src/`, because a
+one-sided result cannot tell a working fix from a fallback that was already
+happening.
+
+The six skips on Alpine are named rather than counted: no libglvnd vendor
+library (E38), no host glibc runtime set to switch to (E51, E52), and no
+Vulkan-or-GL-on-D3D12 driver (E53a, E53, E53b). On a machine with no GPU at all
+the driver's own capability probe turns E41-E53 into skips as well, and the
+suite still passes -- that is the point of probing rather than assuming.
 
 ### Tier 2, 3 and 4
 
@@ -794,69 +1223,93 @@ identical in all twelve combinations, which is what "unchanged" means:
 driver installed. The AppImage fails the same way before and after. The point of
 the test is the equality, not the exit code.
 
-### Skipped, with the specific missing capability
+### Every test that was once skipped, and where it stands now
+
+Five of these -- T1.3 through T1.7 -- were SKIPPED and UNVERIFIED for the life of
+this project and are resolved here rather than quietly dropped. The other four
+each still carry something unverified, and each says what would unblock it.
 
 ```
-T1.3  SKIPPED - allocator-crossing microtest not written. Nearest evidence:
-      the interposed-allocator probe in section 6 recorded 0 NULL returns
-      across a full ICD load, and T2.4 loads 247 objects without a crash.
-      Cross-libc malloc/free ownership transfer remains UNVERIFIED.
+T1.3  PASS - allocator ownership crosses in both directions. Memory
+      malloc'd inside a musl-built guest is freed by the process and the
+      reverse; strdup likewise. Both sides reach one malloc and one free,
+      named by dladdr. E49, section 7.4.
 
-T1.4  SKIPPED - errno-coherence microtest not written. UNVERIFIED.
+T1.4  PASS - one errno location. A failing open inside the musl guest sets
+      ENOENT and the process reads 2 from its own errno in the same thread,
+      before anything else can clobber it. E49.
 
-T1.5  SKIPPED - FILE* crossing microtest not written. This one matters:
-      glibc's FILE is 216 bytes, musl's is opaque, and it is on the hazard
-      list. UNVERIFIED.
+T1.5  PASS - a FILE* opened by the process is written from inside the musl
+      guest and read back byte for byte, and both sides carry the same
+      stdout FILE object address. glibc's FILE is 216 bytes and musl's is
+      neither, so only one of them can be right about the object; the
+      measurement says which. E49.
 
-T1.6  SKIPPED - pthread_mutex_t and cond_t sharing under TSan not written.
-      UNVERIFIED.
+T1.6  PASS - a mutex made by the process is locked and unlocked from the
+      guest and left unlocked; a mutex the guest allocated with its own
+      sizeof is locked by the process; and a condition variable the process
+      waits on is signalled from the guest, bounded by a 5 s timeout so a
+      broken binding fails rather than hangs. E49. Not run under TSan: that
+      remains UNVERIFIED.
 
-T1.7  SKIPPED - Solo's dev/abi_probe.c was not ported, so the glibc-vs-musl
-      struct-size divergences (regmatch_t 8 vs 16, rusage 144 vs 272,
-      sched_param 4 vs 48, ucontext_t 968 vs 936, the FTW_* constants,
-      O_LARGEFILE) are still NOT proven unused by the closure. This was
-      previously called "the single most likely home of the T3.2 failure".
-      It was not: 6.2 found T3.2 elsewhere and fixed it, and vkcube now
-      renders with those divergences untested. They remain a real hazard for
-      code paths this workload does not reach, so this stays SKIPPED rather
-      than being quietly dropped -- but it is no longer the top of the list.
+T1.7  PASS, with two live hazards named. The divergences are real --
+      regmatch_t 16 vs 8, rusage 272 vs 144, sched_param 48 vs 4,
+      ucontext_t 936 vs 968, all seven FTW_* off by one, O_LARGEFILE
+      32768 vs 0 -- and mostly harmless, because every named FIELD is at the
+      same offset in both. What is NOT harmless is a musl-built object
+      reading back a struct glibc filled at its own stride: regexec reports
+      a match ending at byte 7 and the guest reads 12884901888, and an nftw
+      walk over two directories counts none. Those two cannot be fixed from
+      a loader shim. E50 fails if the count of live hazards ever changes.
+      Section 7.4.
 
 T3.3  SKIPPED on Alpine - glxgears cannot run there for a reason that is not
       libc: Alpine's mesa-gl is classic Mesa, not libglvnd, so no
       libGLX_<vendor>.so.0 exists for the AppImage's bundled libglvnd to
-      dlopen. PASSES on a glibc host with libglvnd (E38,
-      GL_RENDERER = llvmpipe). No loader shim can supply a file the
-      distribution does not ship.
+      dlopen. PASSES on a glibc host with libglvnd, in software (E38,
+      GL_RENDERER = llvmpipe) and on hardware (E53, GL_RENDERER = D3D12
+      (NVIDIA GeForce RTX 3050 Ti Laptop GPU)). No loader shim can supply a
+      file the distribution does not ship; unblocking this needs a musl
+      distro that ships libglvnd.
 
-T5.1  SKIPPED - no DRM render node, which is NOT the same as no GPU. The
-      machine has a discrete NVIDIA GeForce RTX 3050 Ti Laptop (driver
-      580.97, 4096 MiB) and an Intel Iris Xe, and the NVIDIA one is live
-      from Linux:
+T5.1  PARTIAL - no DRM render node, which is NOT the same as no GPU, which
+      in turn is not the same as no hardware result. This machine has a
+      discrete NVIDIA GeForce RTX 3050 Ti Laptop (driver 580.97) and an
+      Intel Iris Xe, both live from Linux, and neither reachable through
+      /dev/dri: WSL2 publishes no DRM render nodes at all, so radv, anv and
+      radeonsi cannot initialise however much silicon is present.
 
-          $ /usr/lib/wsl/lib/nvidia-smi -L      # inside a container
-          GPU 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU (UUID: GPU-df849629-...)
+      What does reach them is /dev/dxg. Mesa's d3d12 GALLIUM driver needs no
+      DRM node and Debian packages it, so the OpenGL path runs on hardware
+      (E53, GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Ti Laptop GPU), 121
+      FPS through the unmodified AppImage). NVIDIA's CUDA userspace reaches
+      the same device for compute (E41, E52).
 
-      What is absent is /dev/dri. WSL2 exposes GPUs through /dev/dxg
-      paravirtualisation and publishes no DRM render nodes at all, so radv,
-      anv and radeonsi cannot initialise however much silicon is present.
-      Debian's mesa-vulkan-drivers ships libvulkan_intel.so and
-      libvulkan_radeon.so in these containers; neither can open a device.
-      Hardware-specific failures such as libdrm ioctl ABI stay UNVERIFIED.
-      Nearest evidence remains T2.2 and T2.4 on lavapipe, which exercise the
-      identical dlopen path.
+      Still UNVERIFIED: hardware VULKAN. Mesa's Vulkan-on-D3D12 driver
+      (dzn) is microsoft-experimental and Debian does not package it, so
+      every ICD result here is lavapipe. Hardware-specific failures in the
+      DRM drivers -- libdrm ioctl ABI above all -- stay UNVERIFIED and need
+      a non-WSL Linux host.
 
-T5.2  SKIPPED for the graphics stack, NEWLY POSSIBLE for the compute stack.
-      The NVIDIA userspace here is the WSL flavour: /usr/lib/wsl/lib holds
-      libcuda.so.1, libnvidia-ml.so.1, libnvoptix, libnvwgf2umx and
-      Microsoft's libd3d12/libdxcore. There is no libGLX_nvidia.so.0, no
-      nvidia_icd.json and no /dev/nvidia*, so the proprietary GL/Vulkan
-      driver cannot be tested. libcuda.so.1 CAN be: it is a real
-      closed-source glibc-built host driver library, max requirement
-      GLIBC_2.2.5, with libdl.so.2 and libpthread.so.0 as separate
-      DT_NEEDEDs -- the pre-2.34 layout, which is E6/E7's re-homing case.
-      Every host driver measured so far has been open-source Mesa, so this
-      would be the first proprietary one. Written up as a task in
-      CONTINUE.md 4.3.
+T5.2  PASS, and the result is not the one the task predicted. NVIDIA's
+      libcuda.so.1 is a real closed-source glibc-built host driver, and it
+      loads under the AppImage's bundled glibc 2.44 on Alpine and
+      round-trips 4096 bytes through the GPU (E41). So does the control with
+      the feature off, and upstream's shim, and no shim at all: the blob is
+      built against a GLIBC_2.2.5 floor, so nothing in it can be missing and
+      zero objects are rewritten (E42). A proprietary driver turns out to be
+      the LEAST likely host library to need this fix.
+
+      What the vendor stack did need is in section 7.2: Microsoft's
+      libdxcore.so and libd3d12.so carry no symbol versioning at all, so as
+      shipped the CUDA stack binds two different pthread_cond_* families in
+      one process (E43a, 5 of 6 symbols MIXED). This repository's preload
+      makes them one (E43). Latent rather than currently fatal; the limit of
+      that claim is stated where it is made.
+
+      Still UNVERIFIED: the proprietary GRAPHICS driver. /usr/lib/wsl/lib
+      has no libGLX_nvidia.so.0, no nvidia_icd.json and no /dev/nvidia*, so
+      the closed-source GL and Vulkan drivers cannot be tested here at all.
 
 T5.3  SKIPPED - no aarch64 hardware. This machine is x86_64 (i7-12700H).
       The code is arch-parameterised (RS_LDSO, RS_TRIPLET, the syscall
@@ -865,31 +1318,38 @@ T5.3  SKIPPED - no aarch64 hardware. This machine is x86_64 (i7-12700H).
 
 ---
 
-## 8. Measured versus assumed
+## 9. Measured versus assumed
 
 **Measured:** every table and quoted output above, plus `experiments/run.ps1`
-(31/31), `experiments/appimage.ps1` (12/12 glibc, 11/11 musl with one named
-skip), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
+(31/31), `experiments/appimage.ps1` (31/31 glibc, 25/25 musl with six named
+skips), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
 the corpus test, and the compiled-and-run sharun patch.
 
 **Assumed or UNVERIFIED:**
 
-- Everything in the skipped list above, most importantly T1.7.
+- The three tests still skipped above: `glxgears` on a musl host (T3.3),
+  hardware **Vulkan** and the DRM-native drivers (T5.1), the proprietary
+  **graphics** driver (T5.2), and aarch64 (T5.3). Each names what would unblock
+  it, and none of them is unblockable from this machine.
+- **T1.6 was not run under a thread sanitiser.** The crossings are exercised and
+  bounded by a timeout, which catches a broken binding; it does not catch a race
+  that happens not to fire.
 - **The generated shim's stub-only symbols have never been called.** Their abort
   path is exercised by construction, not by a driver reaching it.
 - **The `--host-dir` override and the symlink farm are tested in containers,
   not on a real desktop** where `XDG_RUNTIME_DIR` is a user-owned tmpfs. The
   permission model there is UNVERIFIED.
-- **Design R has never run a GPU workload.** It selects correctly on eight
-  distros and passes its self-test, but the end-to-end path where a newer host
-  driver renders under the host runtime is UNVERIFIED, because the only
-  end-to-end target available is the musl case, where Design R correctly
-  declines to switch.
+- **Design R has never run a GPU workload under an AUTO decision.** It now
+  drives both a Vulkan device and the CUDA round trip under the switched runtime
+  (E51, E52, section 7.6), but the switch is forced with `ANYLINUX_RUNTIME=host`:
+  no host here has a glibc newer than the bundled 2.44, so auto correctly
+  declines every time. The path where auto chooses to switch AND a driver runs
+  is still UNVERIFIED, and needs a host with a newer glibc than the bundle.
 - A 32-bit or aarch64 build is UNVERIFIED.
 
 ---
 
-## 9. Known unfixed and out of scope
+## 10. Known unfixed and out of scope
 
 **Case 3, a glibc-built host library loading into a musl process, is out of
 scope and not addressed.** The packaging always bundles glibc deliberately,
@@ -911,7 +1371,7 @@ sonames.
 
 ---
 
-## 10. Residual risk
+## 11. Residual risk
 
 1. **The version-trap set is per-libc and computed, not universal.**
    `version-compat.c` covers what `tools/version_traps.py` finds in the libc it
@@ -919,13 +1379,18 @@ sonames.
    by `make traps` (E26) only if someone runs it. The audit is a build target,
    not an automatic gate, and nothing regenerates it on a bundled-glibc bump.
    Same class as risk 6.
-2. **The glibc-vs-musl hazard list is still unexercised** (T1.7). `regmatch_t`,
-   `rusage`, `sched_param`, `ucontext_t`, the `FTW_*` constants and
-   `O_LARGEFILE` all differ, and nothing here proves the loaded closure avoids
-   them. This was previously called the most probable cause of T3.2; it was not,
-   and vkcube now renders with every one of them untested. That makes the list
-   *less* urgent and no less real: a code path this workload does not reach can
-   still hit any of them.
+2. **Two of the glibc-vs-musl hazards are live, and no loader can fix them**
+   (T1.7, section 7.4). The list is no longer six unknowns: every named field of
+   every divergent struct sits at the same offset, so `rusage`, `sched_param`
+   and `stat` cross harmlessly, and passing host-allocated storage to the guest
+   is safe because glibc's implementation writes glibc's layout. What breaks is
+   a musl-built object reading a glibc-filled struct back at its own stride --
+   `regoff_t` is 4 bytes on glibc and 8 on musl -- and comparing against its own
+   `FTW_*` values, which are off by one. Nothing here reaches either, and
+   nothing here would notice if it did except E50, which is why E50 asserts the
+   count rather than merely printing it. An offset compiled into an object is
+   not reachable from a preload; the only real mitigations are not loading such
+   an object or switching the whole runtime.
 3. **Switching to the host runtime abandons the bundle-everything guarantee.**
    Real, deliberate, surfaced and overridable, but real.
 4. **The generated shim is bounded by construction.** It covers what existed
@@ -952,7 +1417,16 @@ sonames.
    variables, 2003 or earlier. Nothing that ships in an AppImage does, and
    nothing was found that does, but this is an assumption rather than a
    measurement.
-8. **On a musl host, "the feature off" is not a safe fallback.** Measured under
+8. **Library discovery, not `dlopen`, is what breaks a host driver most often
+   here, and two of the three assemblers are still hardcoded lists.**
+   `src/runtime-select.c` now derives its directories from `/etc/ld.so.conf`
+   (section 7.3). Sharun does not yet -- the patch exists and is unapplied --
+   and `foreign-dlopen.c` deliberately never will, because finding libraries is
+   `ld.so`'s job. Until the patch lands, any host that puts a driver somewhere
+   only the cache knows about will fail in a way that does not mention a
+   library: `CUDA_ERROR_NO_DEVICE` (E44) or `glXCreateContext failed` (E53a).
+   Both were measured on this machine, on drivers people actually use.
+9. **On a musl host, "the feature off" is not a safe fallback.** Measured under
    the demo AppImage's own AppRun on Alpine: with `ANYLINUX_LIB_FOREIGN_DLOPEN=0`
    and a search path that reaches `/lib`, the bundled glibc `ld.so` finds
    `libc.musl-x86_64.so.1`, loads it, and the process ends up with **two libc
