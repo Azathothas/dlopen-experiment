@@ -198,11 +198,100 @@ chain with the commands.
 | `glxgears` on Alpine | Alpine's `mesa-gl` is classic Mesa, not libglvnd, so there is no `libGLX_<vendor>.so.0` for the AppImage's bundled libglvnd to `dlopen`. Host packaging, not libc. Passes on a glibc host (E38) | needs a glvnd musl distro, or a probe that bypasses glvnd |
 | Cross-libc ABI microtests: allocator crossing, `errno` coherence, `FILE*` crossing, mutex/cond sharing (T1.3-T1.7) | not written. Previously called the most likely cause of the rendering failure; it was not, and `vkcube` renders with all of them untested. Still real for code paths this workload does not reach | small each |
 | `/etc/ld.so.cache` blindness | the bundled `ld.so` is patched to a private cache path, so a library reachable only through the host cache (Gentoo `/usr/lib/llvm/N/lib64`, Debian `/usr/lib/llvm-N/lib`) is invisible. Reading the cache in the shim would violate the "no second library search" rule in section 8, so the fix belongs in sharun. The failure is now at least *diagnosed* correctly (E28) | design decision first |
-| Real GPU validation (`radv`/`anv`/`radeonsi`) | no discrete GPU available | needs hardware |
-| NVIDIA proprietary driver on musl | no NVIDIA hardware | needs hardware |
-| aarch64 | no aarch64 hardware. The code is arch-parameterised (`RS_LDSO`, `RS_TRIPLET`, syscall number fallbacks) but this is unverified | needs hardware |
+| Real GPU validation (`radv`/`anv`/`radeonsi`) | **not** "no GPU" -- this machine has a discrete NVIDIA RTX 3050 Ti and an Intel Iris Xe. There is no `/dev/dri`. WSL2 publishes no DRM render nodes, so these three cannot initialise however much silicon is present | needs a non-WSL Linux host, or 4.3 |
+| The proprietary-driver case | never tested against anything closed-source; every host driver measured so far is open-source Mesa. **Now possible here** -- see 4.3 | **the task for next session** |
+| aarch64 | no aarch64 hardware; this machine is x86_64 (i7-12700H). The code is arch-parameterised (`RS_LDSO`, `RS_TRIPLET`, syscall number fallbacks) but this is unverified | needs hardware |
 | Upstreaming the sharun patch | deliberately not done, it is a different repository | hand [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch) to the maintainer |
 | Design R running a real GPU workload | the only end-to-end target is the musl case, where Design R correctly declines to switch | needs a newer-glibc host with a GPU |
+
+### 4.3 THE TASK FOR NEXT SESSION: the hardware that is actually here
+
+Checked 2026-08-25. The earlier "no GPU available" was wrong, and the shape of
+what is here is unusual enough to be worth writing down rather than
+rediscovering.
+
+**What the machine has**
+
+| | |
+|---|---|
+| Discrete GPU | NVIDIA GeForce RTX 3050 Ti Laptop, driver 580.97, 4096 MiB |
+| Integrated GPU | Intel Iris Xe Graphics |
+| CPU | i7-12700H, x86_64 only |
+
+**How to reach it from Linux.** The podman machine is a WSL2 Fedora 44 VM.
+GPUs arrive through `/dev/dxg` paravirtualisation, and the driver userspace is
+bind-mounted from Windows at `/usr/lib/wsl/lib`. Both must be passed into a
+container:
+
+```bash
+MSYS_NO_PATHCONV=1 "$PODMAN" run --rm     --device /dev/dxg -v /usr/lib/wsl:/usr/lib/wsl:ro     debian:trixie-slim sh -c 'LD_LIBRARY_PATH=/usr/lib/wsl/lib         /usr/lib/wsl/lib/nvidia-smi -L'
+# GPU 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU (UUID: GPU-df849629-...)
+```
+
+That is the GPU genuinely working, not driver files sitting on disk.
+
+**What is NOT reachable, and why, so nobody re-checks**
+
+- **No `/dev/dri`, anywhere.** Not in the container, not in the podman machine.
+  WSL2 does not publish DRM render nodes. `radv`, `anv` and `radeonsi` are DRM
+  drivers, so they are out regardless. Debian's `mesa-vulkan-drivers` does
+  install `libvulkan_intel.so` and `libvulkan_radeon.so` in these containers
+  and neither can open a device.
+- **No NVIDIA graphics stack.** `/usr/lib/wsl/lib` has no `libGLX_nvidia.so.0`
+  and there is no `nvidia_icd.json` or `/dev/nvidia*`. What is there is CUDA
+  plus a D3D12 user-mode driver (`libnvwgf2umx.so`), which is not a Linux ICD.
+- **No `dzn`.** Debian's Mesa ships no Vulkan-on-D3D12 driver, so there is no
+  packaged route from `/dev/dxg` to a Vulkan device. Confirmed by listing
+  `/usr/share/vulkan/icd.d/`.
+
+**Step 1, cheap and the actual point (~5 minutes).** `libcuda.so.1` is exactly
+the shape this project exists for and has never been tested against: a
+**proprietary, closed-source, glibc-built host driver library**. Everything
+measured so far is open-source Mesa, where the source is available and the
+build is reproducible. This one is a binary blob from a vendor.
+
+```bash
+$ readelf -d /usr/lib/wsl/lib/libcuda.so.1 | grep NEEDED
+  libc.so.6   libdl.so.2   libpthread.so.0
+$ objdump -T /usr/lib/wsl/lib/libcuda.so.1 | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+GLIBC_2.2.5
+```
+
+Note the shape: separate `libdl.so.2` and `libpthread.so.0` edges, i.e. the
+**pre-2.34 layout**. That is E6/E7's re-homing case arriving from a real vendor
+binary rather than a synthetic probe, and `fgn_global_scope_libs[]` is supposed
+to already handle it. A `GLIBC_2.2.5` floor also means nothing needs stripping
+on a glibc host, so E39 predicts **zero rewrites** there.
+
+Do this:
+
+1. Foreign-`dlopen` `/usr/lib/wsl/lib/libcuda.so.1` from the AppImage's bundled
+   glibc 2.44 on **Alpine**, resolve `cuInit` and `cuDeviceGetCount`, and call
+   through them. That is the `tests/icd-harness.c` pattern with a different
+   entry point; write `tests/cudaprobe.c` beside it.
+2. A/B it, feature off and on, exactly as everything else here. Feature-off
+   must fail, or the test proves nothing.
+3. Then the end-to-end version: run `/usr/lib/wsl/lib/nvidia-smi` under the
+   bundled loader. It `dlopen`s `libnvidia-ml.so.1` itself, so a real
+   third-party binary drives the whole path.
+4. Add it to `experiments/40-appimage.sh` as E41/E42, gated on `/dev/dxg`
+   existing, and **SKIPPED with that named capability** when it does not --
+   this suite has to keep passing on machines without a GPU.
+
+What it would prove: that the fix survives contact with a closed-source driver,
+which is the one class of host library that cannot be inspected or rebuilt.
+What it would not prove: anything about the graphics ICD path, which is the
+still-untested part and needs real hardware on a non-WSL host.
+
+**Step 2, bigger (~45 minutes), only if step 1 lands.** Build Mesa with
+`-Dvulkan-drivers=microsoft-experimental` (dzn) and `-Dgallium-drivers=d3d12`
+so `/dev/dxg` becomes a hardware-backed Vulkan and GL device, then re-run the
+whole AppImage suite against **that** ICD instead of lavapipe. It would replace
+the "software rendering only" caveat with a driver that really talks to the
+GPU. Two things to watch: dzn is explicitly experimental, and `libd3d12.so`
+under `/usr/lib/wsl/lib` is glibc-built, so on Alpine the chain becomes
+musl-Mesa on top of a glibc D3D12 layer -- which is either a very good test of
+this work or a distraction, and finding out which is part of the task.
 
 ## 5. Things that will waste your time
 

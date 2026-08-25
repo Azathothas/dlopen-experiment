@@ -164,9 +164,14 @@ re-execing under the candidate runtime before committing to it.
   distros and passes its self-test, but the end-to-end path is unverified,
   because the only end-to-end target available is the musl case, where Design R
   correctly declines to switch.
-- **No hardware validation.** No discrete GPU, no NVIDIA, no aarch64.
-  Everything runs on Mesa lavapipe and llvmpipe, which exercise the identical
-  `dlopen` path.
+- **No hardware validation, but not for the reason you would guess.** The test
+  machine has a discrete NVIDIA RTX 3050 Ti and an Intel Iris Xe, and the
+  NVIDIA one is live from Linux. What it has no `/dev/dri` at all: WSL2
+  publishes no DRM render nodes, so `radv`, `anv` and `radeonsi` cannot
+  initialise however much silicon is present. Everything here runs on Mesa
+  lavapipe and llvmpipe, which exercise the identical `dlopen` path. No
+  aarch64 either. What the hardware DOES open up is the first test against a
+  proprietary, closed-source host driver -- see [CONTINUE.md](CONTINUE.md) 4.3.
 
 Full per-test results, including every skipped test and the specific missing
 capability, are in [REPORT.md](REPORT.md).

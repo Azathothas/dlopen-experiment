@@ -828,16 +828,39 @@ T3.3  SKIPPED on Alpine - glxgears cannot run there for a reason that is not
       GL_RENDERER = llvmpipe). No loader shim can supply a file the
       distribution does not ship.
 
-T5.1  SKIPPED - no discrete GPU in the test environment.
-      Nearest evidence: T2.2 and T2.4 pass with lavapipe (software Vulkan),
-      exercising the identical dlopen path. Hardware-specific failures
-      such as libdrm ioctl ABI remain unverified.
+T5.1  SKIPPED - no DRM render node, which is NOT the same as no GPU. The
+      machine has a discrete NVIDIA GeForce RTX 3050 Ti Laptop (driver
+      580.97, 4096 MiB) and an Intel Iris Xe, and the NVIDIA one is live
+      from Linux:
 
-T5.2  SKIPPED - no NVIDIA hardware.
+          $ /usr/lib/wsl/lib/nvidia-smi -L      # inside a container
+          GPU 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU (UUID: GPU-df849629-...)
 
-T5.3  SKIPPED - no aarch64 hardware. The code is arch-parameterised
-      (RS_LDSO, RS_TRIPLET, the syscall number fallbacks) but this is
-      UNVERIFIED outside x86-64.
+      What is absent is /dev/dri. WSL2 exposes GPUs through /dev/dxg
+      paravirtualisation and publishes no DRM render nodes at all, so radv,
+      anv and radeonsi cannot initialise however much silicon is present.
+      Debian's mesa-vulkan-drivers ships libvulkan_intel.so and
+      libvulkan_radeon.so in these containers; neither can open a device.
+      Hardware-specific failures such as libdrm ioctl ABI stay UNVERIFIED.
+      Nearest evidence remains T2.2 and T2.4 on lavapipe, which exercise the
+      identical dlopen path.
+
+T5.2  SKIPPED for the graphics stack, NEWLY POSSIBLE for the compute stack.
+      The NVIDIA userspace here is the WSL flavour: /usr/lib/wsl/lib holds
+      libcuda.so.1, libnvidia-ml.so.1, libnvoptix, libnvwgf2umx and
+      Microsoft's libd3d12/libdxcore. There is no libGLX_nvidia.so.0, no
+      nvidia_icd.json and no /dev/nvidia*, so the proprietary GL/Vulkan
+      driver cannot be tested. libcuda.so.1 CAN be: it is a real
+      closed-source glibc-built host driver library, max requirement
+      GLIBC_2.2.5, with libdl.so.2 and libpthread.so.0 as separate
+      DT_NEEDEDs -- the pre-2.34 layout, which is E6/E7's re-homing case.
+      Every host driver measured so far has been open-source Mesa, so this
+      would be the first proprietary one. Written up as a task in
+      CONTINUE.md 4.3.
+
+T5.3  SKIPPED - no aarch64 hardware. This machine is x86_64 (i7-12700H).
+      The code is arch-parameterised (RS_LDSO, RS_TRIPLET, the syscall
+      number fallbacks) but this is UNVERIFIED outside x86-64.
 ```
 
 ---
