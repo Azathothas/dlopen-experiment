@@ -405,42 +405,70 @@ static char *fgn_provider_versions[FGN_MAX_VERSIONS];
 static size_t fgn_provider_version_count;
 static int fgn_providers_scanned;
 
+// Walk this object's DT_VERDEF entries.
+//
+// `visit` returns non-zero to stop. Every offset is bounds-checked against the
+// mapped file before it is dereferenced: vd_aux, vd_next and vda_name all come
+// out of the file, and a truncated or hostile object can point them anywhere.
+//
+// One walker rather than three. There were three copies of this loop, each
+// bounding itself slightly differently and none of them bounding vd_aux at all,
+// which is exactly the drift the "two implementations, one of them buggy" rule
+// exists to prevent.
+static void fgn_walk_verdefs(const struct fgn_elf *e,
+                             int (*visit)(void *ctx, const char *name,
+                                          ElfW(Half) ndx, int is_base),
+                             void *ctx) {
+	ElfW(Addr) vd_vaddr = 0;
+	if (!fgn_dyn_find(e, DT_VERDEF, &vd_vaddr) || !e->strtab)
+		return;
+	size_t off = fgn_vaddr_to_offset(e, vd_vaddr);
+	if (off == (size_t)-1)
+		return;
+
+	const char *base = e->map + off;
+	size_t avail = e->size - off;
+	size_t pos = 0;
+	for (size_t guard = 0; guard < 4096; guard++) {
+		if (pos > avail || avail - pos < sizeof(ElfW(Verdef)))
+			return;
+		const ElfW(Verdef) *vd = (const ElfW(Verdef) *)(base + pos);
+		if (vd->vd_version != 1)
+			return;
+
+		const char *name = NULL;
+		if (vd->vd_aux) {
+			// vd_aux is a 32-bit offset from this Verdef, so the sum
+			// cannot wrap a size_t; it can still land past the file.
+			size_t apos = pos + (size_t)vd->vd_aux;
+			if (apos <= avail && avail - apos >= sizeof(ElfW(Verdaux))) {
+				const ElfW(Verdaux) *aux = (const ElfW(Verdaux) *)(base + apos);
+				if (fgn_valid_cstr(e, aux->vda_name))
+					name = e->strtab + aux->vda_name;
+			}
+		}
+		if (name && visit(ctx, name, vd->vd_ndx, (vd->vd_flags & VER_FLG_BASE) != 0))
+			return;
+
+		if (!vd->vd_next)
+			return;
+		pos += vd->vd_next;
+	}
+}
+
+static int fgn_collect_one(void *ctx, const char *name, ElfW(Half) ndx, int is_base) {
+	(void)ctx; (void)ndx;
+	// the VER_FLG_BASE entry names the file itself, not a version
+	if (!is_base && fgn_provider_version_count < FGN_MAX_VERSIONS)
+		fgn_provider_versions[fgn_provider_version_count++] = strdup(name);
+	return 0;
+}
+
 static void fgn_collect_versions_from_file(const char *path) {
 	struct fgn_elf e;
 	if (!fgn_parse_elf(&e, path))
 		return;
-
-	ElfW(Addr) verdef_vaddr = 0;
-	if (!fgn_dyn_find(&e, DT_VERDEF, &verdef_vaddr) || !e.strtab) {
-		fgn_free_elf(&e);
-		return;
-	}
-
-	size_t off = fgn_vaddr_to_offset(&e, verdef_vaddr);
-	if (off == (size_t)-1) {
-		fgn_free_elf(&e);
-		return;
-	}
-
-	const char *base = e.map + off;
-	size_t pos = 0;
-	for (size_t guard = 0; guard < 4096; guard++) {
-		if (pos + sizeof(ElfW(Verdef)) > e.size)
-			break;
-		const ElfW(Verdef) *vd = (const ElfW(Verdef) *)(base + pos);
-		if (vd->vd_version != 1)
-			break;
-		// skip the VER_FLG_BASE entry, it names the file itself
-		if (!(vd->vd_flags & VER_FLG_BASE) && vd->vd_aux && fgn_provider_version_count < FGN_MAX_VERSIONS) {
-			const ElfW(Verdaux) *aux = (const ElfW(Verdaux) *)((const char *)vd + vd->vd_aux);
-			if (fgn_valid_cstr(&e, aux->vda_name))
-				fgn_provider_versions[fgn_provider_version_count++] = strdup(e.strtab + aux->vda_name);
-		}
-		if (!vd->vd_next)
-			break;
-		pos += vd->vd_next;
-	}
-
+	fgn_walk_verdefs(&e, fgn_collect_one, NULL);
 	fgn_free_elf(&e);
 }
 
@@ -538,74 +566,84 @@ static size_t fgn_provider_files;
 
 // Collect DT_VERDEF names from `path` into `p`, ignoring the VER_FLG_BASE
 // entry, which names the file rather than a version.
+static int fgn_provider_one(void *ctx, const char *name, ElfW(Half) ndx, int is_base) {
+	struct fgn_provider *p = ctx;
+	(void)ndx;
+	if (!is_base && p->nvers < FGN_PROV_VERS)
+		p->vers[p->nvers++] = strdup(name);
+	return 0;
+}
+
 static void fgn_provider_load(struct fgn_provider *p, const char *path) {
 	struct fgn_elf e;
 	if (!fgn_parse_elf(&e, path))
 		return;
-
-	ElfW(Addr) vd_vaddr = 0;
-	size_t off;
-	if (!fgn_dyn_find(&e, DT_VERDEF, &vd_vaddr) || !e.strtab ||
-	    (off = fgn_vaddr_to_offset(&e, vd_vaddr)) == (size_t)-1) {
-		fgn_free_elf(&e);
-		return;
-	}
-
-	const char *base = e.map + off;
-	size_t pos = 0;
-	for (size_t guard = 0; guard < 4096 && p->nvers < FGN_PROV_VERS; guard++) {
-		if (pos + sizeof(ElfW(Verdef)) > e.size - off)
-			break;
-		const ElfW(Verdef) *vd = (const ElfW(Verdef) *)(base + pos);
-		if (vd->vd_version != 1)
-			break;
-		if (!(vd->vd_flags & VER_FLG_BASE) && vd->vd_aux) {
-			const ElfW(Verdaux) *aux =
-				(const ElfW(Verdaux) *)((const char *)vd + vd->vd_aux);
-			if (fgn_valid_cstr(&e, aux->vda_name))
-				p->vers[p->nvers++] = strdup(e.strtab + aux->vda_name);
-		}
-		if (!vd->vd_next)
-			break;
-		pos += vd->vd_next;
-	}
+	fgn_walk_verdefs(&e, fgn_provider_one, p);
 	fgn_free_elf(&e);
 }
 
-static struct fgn_provider *fgn_provider_for(const char *file) {
-	for (size_t i = 0; i < fgn_provider_files; i++)
-		if (strcmp(fgn_providers[i].file, file) == 0)
-			return &fgn_providers[i];
-	if (fgn_provider_files >= FGN_PROV_FILES)
-		return NULL;
+// Its own lock, not the handle cache's: this one is held across a file read,
+// and the handle cache is taken on every intercepted dlopen. With no lock at
+// all, two threads can both pass the bounds check and both post-increment
+// fgn_provider_files, which writes one entry past the end of the table.
+//
+// Nothing under this lock can re-enter it. fgn_provider_load only reads a file,
+// and the dlopen below carries RTLD_NOLOAD, which our own hook declines before
+// it touches any shared state.
+static volatile int fgn_provider_lock;
 
-	struct fgn_provider *p = &fgn_providers[fgn_provider_files++];
+static void fgn_lock_providers(void) {
+	while (__sync_lock_test_and_set(&fgn_provider_lock, 1))
+		sched_yield();
+}
+
+static void fgn_unlock_providers(void) {
+	__sync_lock_release(&fgn_provider_lock);
+}
+
+static struct fgn_provider *fgn_provider_for(const char *file) {
+	const char *how = "not resolvable, treating as absent";
+	struct fgn_provider *p = NULL;
+	char bundled[PATH_MAX];
+
+	fgn_lock_providers();
+
+	for (size_t i = 0; i < fgn_provider_files; i++) {
+		if (strcmp(fgn_providers[i].file, file) == 0) {
+			p = &fgn_providers[i];
+			fgn_unlock_providers();
+			return p;                    // already answered, and answers never change
+		}
+	}
+	if (fgn_provider_files >= FGN_PROV_FILES) {
+		fgn_unlock_providers();
+		return NULL;
+	}
+
+	p = &fgn_providers[fgn_provider_files++];
 	snprintf(p->file, sizeof(p->file), "%s", file);
 	p->resolved = 1;
 
-	char bundled[PATH_MAX];
 	if (fgn_bundled_dep_path(file, bundled, sizeof(bundled))) {
 		fgn_provider_load(p, bundled);
-		DEBUG_PRINT("foreign: provider %s -> bundled %s (%zu versions)\n",
-		            file, bundled, p->nvers);
-		return p;
+		how = bundled;
+	} else {
+		// RTLD_NOLOAD asks "is this already in the process", it never loads
+		// anything, and our own dlopen hook declines NOLOAD, so this cannot
+		// recurse back into the rewriting path.
+		void *h = dlopen(file, RTLD_LAZY | RTLD_NOLOAD);
+		if (h) {
+			struct link_map *lm = NULL;
+			if (dlinfo(h, RTLD_DI_LINKMAP, &lm) == 0 && lm && lm->l_name && *lm->l_name)
+				fgn_provider_load(p, lm->l_name);
+			dlclose(h);
+			how = "already loaded";
+		}
 	}
 
-	// RTLD_NOLOAD asks "is this already in the process", it never loads
-	// anything, and our own dlopen hook declines NOLOAD, so this cannot
-	// recurse back into the rewriting path.
-	void *h = dlopen(file, RTLD_LAZY | RTLD_NOLOAD);
-	if (h) {
-		struct link_map *lm = NULL;
-		if (dlinfo(h, RTLD_DI_LINKMAP, &lm) == 0 && lm && lm->l_name && *lm->l_name)
-			fgn_provider_load(p, lm->l_name);
-		dlclose(h);
-		DEBUG_PRINT("foreign: provider %s -> already loaded (%zu versions)\n",
-		            file, p->nvers);
-		return p;
-	}
-
-	DEBUG_PRINT("foreign: provider %s -> not resolvable, treating as absent\n", file);
+	size_t nvers = p->nvers;
+	fgn_unlock_providers();
+	DEBUG_PRINT("foreign: provider %s -> %s (%zu versions)\n", file, how, nvers);
 	return p;
 }
 
@@ -693,33 +731,22 @@ static int fgn_requirements_satisfied(const struct fgn_elf *e) {
 
 // {version index -> name} from DT_VERDEF, resolved for one index at a time so
 // there is nothing to allocate.
-static const char *fgn_verdef_name(const struct fgn_elf *e, ElfW(Half) want) {
-	ElfW(Addr) vd_vaddr = 0;
-	if (!fgn_dyn_find(e, DT_VERDEF, &vd_vaddr) || !e->strtab)
-		return NULL;
-	size_t off = fgn_vaddr_to_offset(e, vd_vaddr);
-	if (off == (size_t)-1)
-		return NULL;
+struct fgn_ndx_query { ElfW(Half) want; const char *found; };
 
-	const char *base = e->map + off;
-	size_t pos = 0;
-	for (size_t guard = 0; guard < 4096; guard++) {
-		if (pos + sizeof(ElfW(Verdef)) > e->size - off)
-			break;
-		const ElfW(Verdef) *vd = (const ElfW(Verdef) *)(base + pos);
-		if (vd->vd_version != 1)
-			break;
-		if (vd->vd_ndx == want && vd->vd_aux) {
-			const ElfW(Verdaux) *aux = (const ElfW(Verdaux) *)((const char *)vd + vd->vd_aux);
-			if (fgn_valid_cstr(e, aux->vda_name))
-				return e->strtab + aux->vda_name;
-			return NULL;
-		}
-		if (!vd->vd_next)
-			break;
-		pos += vd->vd_next;
-	}
-	return NULL;
+static int fgn_verdef_match(void *ctx, const char *name, ElfW(Half) ndx, int is_base) {
+	struct fgn_ndx_query *q = ctx;
+	(void)is_base;
+	if (ndx != q->want)
+		return 0;
+	q->found = name;
+	return 1;
+}
+
+// The version NAME carried by version index `want`, or NULL.
+static const char *fgn_verdef_name(const struct fgn_elf *e, ElfW(Half) want) {
+	struct fgn_ndx_query q = { want, NULL };
+	fgn_walk_verdefs(e, fgn_verdef_match, &q);
+	return q.found;
 }
 
 __attribute__((visibility("hidden")))

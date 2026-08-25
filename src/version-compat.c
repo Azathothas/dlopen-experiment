@@ -135,9 +135,23 @@ static void vc_fatal(const char *sym) {
  * exactly today's behaviour rather than to a NULL call, so the forwarder is
  * never worse than not being there. */
 static void *vc_resolve(const char *sym) {
+	/* fgn_default_version_of() opens and parses a file, so it allocates. If
+	 * anything on that path ever calls a symbol forwarded from this file, the
+	 * second call would resolve through here again and recurse until the stack
+	 * is gone. Nothing does today -- glibc's allocator uses mutexes, not
+	 * condition variables, and does not reach these through the PLT -- but a
+	 * guard costs one thread-local byte and turns an unbounded recursion into
+	 * a slightly worse answer. */
+	static __thread int busy;
 	char ver[64];
 	void *p = NULL;
-	int versioned = fgn_default_version_of(sym, ver, sizeof(ver));
+	int versioned = 0;
+
+	if (!busy) {
+		busy = 1;
+		versioned = fgn_default_version_of(sym, ver, sizeof(ver));
+		busy = 0;
+	}
 
 	if (versioned)
 		p = dlvsym(RTLD_NEXT, (char *)sym, ver);

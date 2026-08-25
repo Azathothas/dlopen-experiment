@@ -106,6 +106,10 @@ class Elf:
         o = self.v2o(vs[0])
         if o is None: return None
         _, n, _ = self._dynsym_span()
+        # The count comes from the hash tables, the table from DT_VERSYM: a
+        # stripped or truncated object can disagree. Read what is actually
+        # there rather than raising out of the middle of an inventory run.
+        n = min(n, max(0, (len(self.d) - o) // 2))
         return list(struct.unpack_from(f'<{n}H', self.d, o))
 
     def verdef_index(self):
