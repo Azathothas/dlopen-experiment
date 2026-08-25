@@ -569,13 +569,30 @@ address at several versions is re-versioning, not an ABI change — the glibc 2.
 libpthread merge does that to 191 symbols and none of them can matter.
 
 ```
+glibc 2.42  multi-version, same address (harmless): 191    different address (traps): 38
 glibc 2.41  multi-version, same address (harmless): 191    different address (traps): 33
 glibc 2.31  multi-version, same address (harmless):  10    different address (traps): 21
 ```
 
 `make traps` fails the build if a libc has a trap `version-compat.c` neither
 forwards nor explicitly declines, so a future glibc cannot introduce one
-silently (**E26**). Three are declined on purpose, with reasons: `memcpy`
+silently (**E26**).
+
+That is not a hypothetical. Run against glibc **2.42** (Arch, Fedora 44) rather
+than the 2.31 and 2.41 this was developed on, the audit failed with five
+uncovered names:
+
+```
+cfgetispeed  cfgetospeed  cfsetispeed  cfsetospeed  cfsetspeed
+                                       default=GLIBC_2.42  others=GLIBC_2.2.5
+```
+
+glibc 2.42 added arbitrary terminal baud rates, so the `GLIBC_2.2.5`
+definitions speak the old `Bnnn`-encoded `speed_t` and the new ones take a real
+number of bits per second. Nothing in a graphics driver closure calls them,
+which is the point: the set grew under a glibc newer than any this was tested
+on, and an audit that enumerates rather than reasons is what noticed. Now
+covered; audited clean on glibc 2.31, 2.41, 2.42 (Arch) and 2.42 (Fedora 44). Three are declined on purpose, with reasons: `memcpy`
 (both definitions satisfy the memcpy contract, checked byte-for-byte over 4096
 size and alignment combinations in **E25**; interposing every memcpy in a
 rendering process to fix nothing is not a trade worth making) and

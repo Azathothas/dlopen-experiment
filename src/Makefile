@@ -27,8 +27,17 @@ TARGET  ?= $(ROOT)/inventories/glibc-2.44.json
 # is a default here rather than something the caller has to remember (issue #1).
 MUSL    ?= $(ROOT)/inventories/musl-1.2.5.json
 # Whichever libc the trap audit runs against. Any glibc will do; the set only
-# grows with newer releases.
-AUDIT_LIBC ?= /lib/x86_64-linux-gnu/libc.so.6
+# grows with newer releases, so prefer the newest one you care about.
+#
+# Found rather than hardcoded: Debian and Ubuntu put it under a triplet
+# directory, Arch, Fedora and openSUSE do not, and a default that exists on one
+# of those and not the others makes `make traps` a Debian-only command.
+AUDIT_LIBC ?= $(firstword $(wildcard \
+                /lib/x86_64-linux-gnu/libc.so.6 \
+                /usr/lib/x86_64-linux-gnu/libc.so.6 \
+                /usr/lib64/libc.so.6 \
+                /lib64/libc.so.6 \
+                /usr/lib/libc.so.6))
 
 all: foreign-dlopen.so runtime-select
 
@@ -59,6 +68,11 @@ shim:
 # Does version-compat.c still cover every multi-version trap this libc has?
 # Run it against the NEWEST glibc you care about: the set only grows.
 traps:
+	@if [ -z "$(AUDIT_LIBC)" ]; then \
+	   echo "FAIL: no libc.so.6 found in any of the usual places."; \
+	   echo "      Pass one: make traps AUDIT_LIBC=/path/to/libc.so.6"; \
+	   exit 1; \
+	 fi
 	$(PYTHON) $(ROOT)/tools/version_traps.py $(AUDIT_LIBC) --check version-compat.c
 
 clean:

@@ -82,6 +82,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -353,6 +354,40 @@ VC_SLOT(lio_listio64)
 VC_VISIBLE int lio_listio64(int mode, struct aiocb64 *const list[], int n,
                             struct sigevent *ev) {
 	return VC_CALL(lio_listio64)(mode, list, n, ev);
+}
+
+/* --- terminal line speed: glibc 2.42 added arbitrary baud rates ------- */
+/*
+ * Found by `make traps` on glibc 2.42, not by reasoning: the GLIBC_2.2.5
+ * definitions speak the old Bnnn-encoded speed_t and the 2.42 ones take a real
+ * number of bits per second. Nothing in a graphics driver closure calls these,
+ * which is exactly why an audit that enumerates rather than guesses is worth
+ * having -- the set grew under a glibc newer than any this was developed on.
+ */
+
+VC_SLOT(cfgetispeed)
+VC_VISIBLE speed_t cfgetispeed(const struct termios *t) {
+	return VC_CALL(cfgetispeed)(t);
+}
+
+VC_SLOT(cfgetospeed)
+VC_VISIBLE speed_t cfgetospeed(const struct termios *t) {
+	return VC_CALL(cfgetospeed)(t);
+}
+
+VC_SLOT(cfsetispeed)
+VC_VISIBLE int cfsetispeed(struct termios *t, speed_t speed) {
+	return VC_CALL(cfsetispeed)(t, speed);
+}
+
+VC_SLOT(cfsetospeed)
+VC_VISIBLE int cfsetospeed(struct termios *t, speed_t speed) {
+	return VC_CALL(cfsetospeed)(t, speed);
+}
+
+VC_SLOT(cfsetspeed)
+VC_VISIBLE int cfsetspeed(struct termios *t, speed_t speed) {
+	return VC_CALL(cfsetspeed)(t, speed);
 }
 
 VC_SLOT(quick_exit)
