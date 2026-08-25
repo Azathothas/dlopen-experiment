@@ -503,8 +503,127 @@ static int fgn_have_version(const char *name) {
 	return 0;
 }
 
-// 1 when every required version comes from our libc, objects without
-// version info (musl built) are trivially satisfied
+// ---------------------------------------------------------------------------
+// Does the object that will satisfy `file` provide version `ver`?
+//
+// A DT_VERNEED record names a FILE and the versions wanted FROM it. Asking the
+// question that way is both more precise and much cheaper than the flat set
+// above, which only ever learned our libc's own names: every GLIBCXX_*,
+// CXXABI_* and LLVM_* requirement was therefore unvouchable, so
+// fgn_requirements_satisfied() returned 0 for everything in a Mesa closure and
+// objects that needed nothing got rewritten anyway. On a host whose glibc is
+// OLDER than the bundled one -- where by construction nothing CAN be missing --
+// that turned a working driver into a rewritten one for no reason (issue #1).
+//
+// Resolution order matches the project's own rule that bundled beats host:
+//   1. $APPDIR/lib/<file>, if the bundle owns that soname
+//   2. whatever is already loaded under that soname
+//   3. nothing -- and then the answer is "no", which strips. Conservative is
+//      the right direction: a needless rewrite is survivable, a missing
+//      version is a hard load failure.
+// ---------------------------------------------------------------------------
+// Defined further down with the rest of the load path; declared here because
+// "is this soname bundled" is the first question a provider lookup asks.
+static int fgn_bundled_dep_path(const char *soname, char *out, size_t outsz);
+
+#define FGN_PROV_FILES 16
+#define FGN_PROV_VERS  128
+static struct fgn_provider {
+	char file[128];
+	char *vers[FGN_PROV_VERS];
+	size_t nvers;
+	int resolved;                    // 1 once we have looked, even if empty
+} fgn_providers[FGN_PROV_FILES];
+static size_t fgn_provider_files;
+
+// Collect DT_VERDEF names from `path` into `p`, ignoring the VER_FLG_BASE
+// entry, which names the file rather than a version.
+static void fgn_provider_load(struct fgn_provider *p, const char *path) {
+	struct fgn_elf e;
+	if (!fgn_parse_elf(&e, path))
+		return;
+
+	ElfW(Addr) vd_vaddr = 0;
+	size_t off;
+	if (!fgn_dyn_find(&e, DT_VERDEF, &vd_vaddr) || !e.strtab ||
+	    (off = fgn_vaddr_to_offset(&e, vd_vaddr)) == (size_t)-1) {
+		fgn_free_elf(&e);
+		return;
+	}
+
+	const char *base = e.map + off;
+	size_t pos = 0;
+	for (size_t guard = 0; guard < 4096 && p->nvers < FGN_PROV_VERS; guard++) {
+		if (pos + sizeof(ElfW(Verdef)) > e.size - off)
+			break;
+		const ElfW(Verdef) *vd = (const ElfW(Verdef) *)(base + pos);
+		if (vd->vd_version != 1)
+			break;
+		if (!(vd->vd_flags & VER_FLG_BASE) && vd->vd_aux) {
+			const ElfW(Verdaux) *aux =
+				(const ElfW(Verdaux) *)((const char *)vd + vd->vd_aux);
+			if (fgn_valid_cstr(&e, aux->vda_name))
+				p->vers[p->nvers++] = strdup(e.strtab + aux->vda_name);
+		}
+		if (!vd->vd_next)
+			break;
+		pos += vd->vd_next;
+	}
+	fgn_free_elf(&e);
+}
+
+static struct fgn_provider *fgn_provider_for(const char *file) {
+	for (size_t i = 0; i < fgn_provider_files; i++)
+		if (strcmp(fgn_providers[i].file, file) == 0)
+			return &fgn_providers[i];
+	if (fgn_provider_files >= FGN_PROV_FILES)
+		return NULL;
+
+	struct fgn_provider *p = &fgn_providers[fgn_provider_files++];
+	snprintf(p->file, sizeof(p->file), "%s", file);
+	p->resolved = 1;
+
+	char bundled[PATH_MAX];
+	if (fgn_bundled_dep_path(file, bundled, sizeof(bundled))) {
+		fgn_provider_load(p, bundled);
+		DEBUG_PRINT("foreign: provider %s -> bundled %s (%zu versions)\n",
+		            file, bundled, p->nvers);
+		return p;
+	}
+
+	// RTLD_NOLOAD asks "is this already in the process", it never loads
+	// anything, and our own dlopen hook declines NOLOAD, so this cannot
+	// recurse back into the rewriting path.
+	void *h = dlopen(file, RTLD_LAZY | RTLD_NOLOAD);
+	if (h) {
+		struct link_map *lm = NULL;
+		if (dlinfo(h, RTLD_DI_LINKMAP, &lm) == 0 && lm && lm->l_name && *lm->l_name)
+			fgn_provider_load(p, lm->l_name);
+		dlclose(h);
+		DEBUG_PRINT("foreign: provider %s -> already loaded (%zu versions)\n",
+		            file, p->nvers);
+		return p;
+	}
+
+	DEBUG_PRINT("foreign: provider %s -> not resolvable, treating as absent\n", file);
+	return p;
+}
+
+static int fgn_file_provides(const char *file, const char *ver) {
+	struct fgn_provider *p = fgn_provider_for(file);
+	if (!p)
+		return fgn_have_version(ver);     // table full: fall back to the flat set
+	for (size_t i = 0; i < p->nvers; i++)
+		if (strcmp(p->vers[i], ver) == 0)
+			return 1;
+	// libc is special only in that we may know it under a different soname
+	// than the verneed spells; the flat set covers that.
+	return fgn_have_version(ver);
+}
+
+// 1 when every version this object requires is provided by the object that
+// will satisfy the file it names. Objects without version info (musl built)
+// are trivially satisfied.
 static int fgn_requirements_satisfied(const struct fgn_elf *e) {
 	ElfW(Addr) verneed_vaddr = 0;
 	if (!fgn_dyn_find(e, DT_VERNEED, &verneed_vaddr))
@@ -525,6 +644,13 @@ static int fgn_requirements_satisfied(const struct fgn_elf *e) {
 		if (vn->vn_version != 1)
 			return 0;
 
+		// The file these versions are wanted FROM. Without it the question
+		// degenerates into "does anything anywhere define this name", which
+		// is what made every Mesa object look unsatisfiable.
+		if (!fgn_valid_cstr(e, vn->vn_file))
+			return 0;
+		const char *file = e->strtab + vn->vn_file;
+
 		size_t apos = pos + vn->vn_aux;
 		for (size_t aux_guard = 0; aux_guard < 4096; aux_guard++) {
 			if (apos + sizeof(ElfW(Vernaux)) > e->size)
@@ -532,8 +658,11 @@ static int fgn_requirements_satisfied(const struct fgn_elf *e) {
 			const ElfW(Vernaux) *aux = (const ElfW(Vernaux) *)(base + apos);
 			if (!fgn_valid_cstr(e, aux->vna_name))
 				return 0;
-			if (!fgn_have_version(e->strtab + aux->vna_name))
+			if (!fgn_file_provides(file, e->strtab + aux->vna_name)) {
+				DEBUG_PRINT("foreign: %s wants %s from %s, which does not have it\n",
+				            "this object", e->strtab + aux->vna_name, file);
 				return 0;
+			}
 			if (!aux->vna_next)
 				break;
 			apos += aux->vna_next;
@@ -1291,9 +1420,12 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 	}
 
 	int has_tags = fgn_has_version_tags(&e);
-	// the satisfaction check only knows our libc's set, whatever it
-	// cannot vouch for gets stripped
-	int needs_strip = has_tags && !fgn_requirements_satisfied(&e);
+	// The satisfaction check is deliberately NOT run here. It asks whether
+	// the object that will satisfy each DT_VERNEED file provides the versions
+	// wanted from it, and half those files are this object's own dependencies,
+	// which have not been loaded yet. Asking now would answer "absent" for
+	// every one of them and strip unconditionally. It runs after the closure
+	// walk below instead.
 
 	// pre-pass: classify the dependency edges. musl flavored objects
 	// demand musl libc, which gets dropped so nothing poisons the process
@@ -1312,9 +1444,7 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 				drop_idx[drop_count++] = i;
 		}
 	}
-	if (musl_guest)
-		needs_strip = 1;
-
+	int needs_strip = 0;
 	struct fgn_deps deps = { { NULL }, 0 };
 
 	// closure first, even a satisfiable parent may pull in children
@@ -1392,13 +1522,34 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 		free(dep_canon);
 	}
 
+	// NOW the satisfaction question can be answered: the closure is loaded, so
+	// every file a DT_VERNEED record names either exists in this process or
+	// genuinely could not be found. Asking before the walk answered "absent"
+	// for every one of this object's own dependencies and stripped everything.
+	//
+	// A musl guest is stripped unconditionally: it has no version info to
+	// check, and its libc dependency is about to be dropped.
+	needs_strip = musl_guest || (has_tags && !fgn_requirements_satisfied(&e));
+	if (!needs_strip)
+		DEBUG_PRINT("foreign: %s needs no rewrite, loading it unchanged\n", canon);
+
+	// ANYLINUX_LIB_FOREIGN_NOSTRIP=1 keeps the version tags but still emits and
+	// loads the private copy, which separates "the rewrite broke it" from
+	// "being loaded from a different path broke it" in a single A/B. Purely a
+	// diagnostic: with the tags intact a genuinely unsatisfiable object just
+	// fails to load, and the plain fallback below then reports why.
+	const char *nostrip_env = getenv("ANYLINUX_LIB_FOREIGN_NOSTRIP");
+	int strip_disabled = nostrip_env && strcmp(nostrip_env, "1") == 0;
+
 	void *handle = NULL;
 	char *load_path = NULL;
 	int dry_run = fgn_dryrun_enabled();
 
 	if (needs_strip) {
-		DEBUG_PRINT("foreign: rewriting %s\n", canon);
-		fgn_strip_versions(&e);
+		DEBUG_PRINT("foreign: rewriting %s%s\n", canon,
+		            strip_disabled ? " (NOSTRIP: version tags kept)" : "");
+		if (!strip_disabled)
+			fgn_strip_versions(&e);
 		// drop the edges that would pull musl libc in, every import the
 		// guest owns binds to our libc by name instead
 		for (size_t i = 0; i < drop_count; i++)
@@ -1414,7 +1565,10 @@ static void *fgn_load(dlopen_func_t dlopen_orig, const char *canon, int flags, i
 			        " [foreign-dlopen.so] >> DRYRUN %s\n"
 			        " [foreign-dlopen.so] >>   version tags: %s\n"
 			        " [foreign-dlopen.so] >>   musl NEEDED dropped: %zu\n",
-			        canon, has_tags ? "stripped" : "none present", drop_count);
+			        canon,
+			        !has_tags ? "none present"
+			                  : strip_disabled ? "kept (NOSTRIP)" : "stripped",
+			        drop_count);
 			fgn_report_unresolved(&e, canon, &deps, 1);
 			fgn_free_elf(&e);
 			return NULL;

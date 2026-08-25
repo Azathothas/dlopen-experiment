@@ -47,6 +47,15 @@ run() {                        # run <id> <expect: OK|FAIL> <needle> <cmd...>
 
 skip() { SKIP=$((SKIP+1)); printf '  %-6s %-8s %s\n' "$1" "SKIPPED" "$2"; }
 
+# For cases whose measurement is a NUMBER rather than a string in some output.
+# The verdict is computed here rather than inside $( ), because incrementing
+# PASS inside a command substitution increments it in a subshell and the totals
+# then silently disagree with the per-line verdicts.
+verdict() {                    # verdict <id> <0|1 ok> <text>
+    if [ "$2" = 1 ]; then PASS=$((PASS+1)); v=MATCH; else FAIL=$((FAIL+1)); v=MISMATCH; fi
+    printf '  %-6s %-8s %s\n' "$1" "$v" "$3"
+}
+
 # Run something under the BUNDLED loader with the preload, feature forced.
 under() {                      # under <0|1> <prog> [args...]
     mode="$1"; shift
@@ -129,6 +138,26 @@ run E31 OK "NO-DEVICES" probe_verdict 0
 run E32 OK "DEVICES  " probe_verdict 1
 
 echo
+echo "-- A2. how much did it have to rewrite? --------------------------"
+# Rewriting is not free: every rewritten object is a private copy loaded from a
+# path the application did not ask for, and the Vulkan loader says so out loud.
+# It should happen when it is NEEDED and not otherwise. On a glibc host older
+# than the bundled glibc, nothing can be missing, so the right number is zero.
+rm -f "$XDG_RUNTIME_DIR"/.anylinux-fgn-* 2>/dev/null
+trace=$(env ANYLINUX_LIB_FOREIGN_DLOPEN=1 APPDIR="$APPDIR" ANYLINUX_LIB_DEBUG=1 \
+        "$LD" --library-path "$LP" --preload "$LP/foreign-dlopen.so" \
+        /w/build/vkprobe 2>&1)
+rw=$(printf '%s' "$trace" | grep -c 'foreign: rewriting')
+kept=$(printf '%s' "$trace" | grep -c 'needs no rewrite')
+if [ "$HOSTLIBC" = musl ]; then
+    [ "$rw" -gt 0 ] && r39=1 || r39=0
+    verdict E39 "$r39" "musl host: $rw object(s) rewritten, $kept left unchanged (rewriting is unavoidable here)"
+else
+    [ "$rw" -eq 0 ] && r39=1 || r39=0
+    verdict E39 "$r39" "glibc host: $rw object(s) rewritten, $kept left unchanged (zero is the right answer)"
+fi
+
+echo
 echo "-- B. how much of the host's /usr/lib is loadable ----------------"
 # Where the host actually keeps its libraries: the directory the ICD lives in,
 # not a guess. Debian puts them under /usr/lib/<triplet>, Alpine in /usr/lib.
@@ -141,13 +170,6 @@ on=$(grep -c '^OK' /tmp/corpus_on.txt)
 echo "  corpus directory: $CORPUS  ($total libraries)"
 
 # The verdicts are computed OUTSIDE a command substitution. Incrementing PASS
-# inside $( ) increments it in a subshell, so the totals silently disagreed
-# with the per-line verdicts.
-verdict() {                    # verdict <id> <0|1 ok> <text>
-    if [ "$2" = 1 ]; then PASS=$((PASS+1)); v=MATCH; else FAIL=$((FAIL+1)); v=MISMATCH; fi
-    printf '  %-6s %-8s %s\n' "$1" "$v" "$3"
-}
-
 if [ "$HOSTLIBC" = musl ]; then
     # Nothing built against musl can load without the fix, and essentially
     # everything should with it.
