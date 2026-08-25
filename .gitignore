@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 # build products
 src/foreign-dlopen.so
+src/gl-fwd.so
 src/runtime-select
 # ephemeral scratch
 .tmp/

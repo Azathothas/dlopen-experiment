@@ -39,7 +39,7 @@ AUDIT_LIBC ?= $(firstword $(wildcard \
                 /lib64/libc.so.6 \
                 /usr/lib/libc.so.6))
 
-all: foreign-dlopen.so runtime-select
+all: foreign-dlopen.so gl-fwd.so runtime-select
 
 # The preload carries the shim: it is already in the global lookup scope, so
 # its exports satisfy undefined symbols in anything dlopen'd later (E2, E5).
@@ -57,6 +57,15 @@ foreign-dlopen.so: foreign-dlopen.c forward-shim.c version-compat.c
 
 runtime-select: runtime-select.c
 	$(CC) $(CFLAGS) $< -o $@ -ldl
+
+# The OpenGL forwarding shim for hosts whose GL is classic (non-glvnd) Mesa:
+# every musl distro, plus pre-glvnd glibc distros such as Ubuntu 14.04 and
+# Debian 8. Built with the SONAME libGL.so.1 so that preloading it (after
+# foreign-dlopen.so) makes ld.so bind an app's DT_NEEDED libGL.so.1 to this
+# shim instead of the bundled glvnd dispatcher, which has no vendor lib to
+# dlopen there. See gl-fwd.c for the mechanism and its current limitations.
+gl-fwd.so: gl-fwd.c
+	$(CC) $(SOFLAGS) $(CFLAGS) -Wl,-soname,libGL.so.1 $< -o $@ -ldl
 
 # Regenerate the shim for a different bundled glibc. This is 5.2 step 4: the
 # treadmill becomes a build step instead of a per-bug-report patch.
@@ -76,6 +85,6 @@ traps:
 	$(PYTHON) $(ROOT)/tools/version_traps.py $(AUDIT_LIBC) --check version-compat.c
 
 clean:
-	rm -f foreign-dlopen.so runtime-select
+	rm -f foreign-dlopen.so gl-fwd.so runtime-select
 
 .PHONY: all shim traps clean
