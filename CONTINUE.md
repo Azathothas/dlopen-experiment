@@ -64,11 +64,18 @@ and how to reach the GPU. Neither is guessable.
    glvnd glibc host, **40/40** with five named skips on musl, **26/26** with
    nineteen named skips on each of ubuntu:14.04 and ubuntu:16.04, and **7/7**
    on the gtk4 stage.
-2. **Update 4.0 in place.** An item closes where it is written, with the
-   command that proves it and the output. ⛔ **A premise a measurement disproves
-   keeps its title and gets the correction written underneath it** -- never a
-   silent edit, because the title is how the item has been referred to.
-3. **Rewrite 4.3** so the next reader does not redo what you did.
+2. **Write the closure where the item is written**, with the command that
+   proves it and the output. 4.0 is a finished list now, so a NEW item is a new
+   numbered subsection or a 4.2 row rather than an extra table line -- but the
+   rule that produced 4.0.1 still applies to whatever you add. ⛔ **A premise a
+   measurement disproves keeps its title and gets the correction written
+   underneath it** -- never a silent edit, because the title is how the item
+   has been referred to everywhere else.
+3. **Rewrite 4.3** so the next reader does not redo what you did. ⭐ It is the
+   only section written FOR the next session rather than about this one, and
+   the thing it is worth spending words on is not what you built -- it is which
+   of your assumptions turned out to be wrong, and what you would look at first
+   if you had the session again.
 4. Update `README.md` and `REPORT.md` for anything a user or a reviewer would
    now be told wrongly. ⚠ Every headline count appears in more than one
    document today; if you change one, `git grep` for it.
@@ -807,10 +814,11 @@ structural rather than a packaging accident.
 |---|---|---|
 | **Vulkan on hardware** | Mesa's Vulkan-on-D3D12 driver (`dzn`) is `microsoft-experimental` and Debian does not package it, so every ICD result here is lavapipe. OpenGL *is* on hardware now (E53), through the `d3d12` **Gallium** driver, which Debian does package as `dri/d3d12_dri.so` | build Mesa with `-Dvulkan-drivers=microsoft-experimental`, then re-run the suite against that ICD. Watch for `libd3d12.so` being glibc-built: on Alpine the chain becomes musl-Mesa on a glibc D3D12 layer |
 | DRM-native drivers (`radv`, `anv`, `radeonsi`) | there is no `/dev/dri` anywhere on this machine. WSL2 publishes no DRM render nodes, so these three cannot initialise however much silicon is present | a non-WSL Linux host |
-| The unmeasured plugin boundaries | `libva`, `libvdpau`, `libasound`, `libpulse`, `libOpenCL` and `libgbm` are the same shape as the OpenGL one and this AppDir bundles none of them, so there is nothing here to measure. `tools/plugin_boundaries.py` classifies them on sight if one turns up. `libX11.so.6` IS bundled and its loadable-i18n boundary is unmeasured. ⚠ B6's gtk4 AppDir has 272 libraries and has NOT been run through `plugin_boundaries.py`; doing so is the cheapest way to find the next boundary and it is not blocked | an AppImage that bundles one of them. The gtk4 AppDir may already be one |
+| The unmeasured plugin boundaries | `libva`, `libvdpau`, `libasound`, `libpulse`, `libOpenCL` and `libgbm` are the same shape as the OpenGL one and this AppDir bundles none of them, so there is nothing here to measure. `tools/plugin_boundaries.py` classifies them on sight if one turns up. `libX11.so.6` IS bundled and its loadable-i18n boundary is unmeasured. ⭐ **This row is out of date and the correction is the next item below** | an AppImage that bundles one of them -- and one now does |
 | **Hardware GL on the CLASSIC-Mesa path (B7)** | there is no host on this machine that is both classic-Mesa and able to reach a GPU. The only GPU route here is Mesa's `d3d12` Gallium driver over `/dev/dxg`, which needs Mesa >= 21; every glibc distro at Mesa >= 21 uses libglvnd, and the classic holdouts are musl distros that do not build `d3d12`. Measured: Alpine 3.22 ships no `d3d12_dri.so`, and `/usr/lib/wsl/lib` ships no GL, GLX or EGL at all | a machine with a DRM render node and a classic-Mesa distro. Reported working on an RX 580 from outside ([issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1)), not reproduced here |
 | **Ubuntu 12.04's EGL (B10)** | Mesa 8.0.4 ships EGL 1.4 and, per the same outside report, `eglInitialize` fails there even with the right directory. Not measured here -- 12.04 is on `old-releases` and was not added as a host -- and it is the host's Mesa either way: 16.04's EGL fails the same probe NATIVELY, with no AppImage in the process (E79) | nothing in this repository. An AppImage cannot give a host an EGL implementation it does not have |
 | No host implementation for 1097 of the GL entry points | a property of Alpine's Mesa 25.1, not of this repository: they are extensions glvnd knows the names of and that Mesa has no code for. Making the absent case OBSERVABLE was B1 and is DONE -- a call to one is a line naming it, and `glprobe` reaches zero of the 1097 (4.0.1). Making Mesa implement them is not this project's work | nothing here. See B1 |
+| **Nine unclassified loaders in the gtk4 AppDir** | measured, not guessed: `python3 tools/plugin_boundaries.py .tmp/gtk4x/AppDir --check` reports `covered 2, n/a 1, unmeasured 3, UNCLASSIFIED 9`. Two of the three `unmeasured` are `libgbm.so.1` and `libva.so.2`, which the row above says this repository has no AppImage for -- it does now. ⭐ And one of the nine is **`libepoxy.so.0`**, which is itself a GL entry-point loader: it `dlopen`s `libGL`/`libEGL`/`libGLESv2` by soname and resolves through them, which is the same DISPATCHER shape as libglvnd and is very likely why gtk4-demo's counts are 1 GL and 46 GLES (E83). Nobody has looked at it | nothing. It is not blocked, it is unexamined, and it is the cheapest lead in this file: `libepoxy.so.0` first, then the other eight. ⛔ Do not assume it is benign because GTK4 rendered -- `libdecor-0.so.0` was benign and `libGLX.so.0` was the whole of section 9 |
 | The two live ABI hazards | `regoff_t` is 4 bytes on glibc and 8 on musl, and the `FTW_*` values are off by one, so a musl-built object reads a glibc-filled `regmatch_t[]` or classifies an `nftw` entry wrongly (E50). An offset compiled into an object is not reachable from a preload | nothing in this repository. It is a property of the two libcs, and the useful output is the list of two, which E50 keeps honest |
 | Three residual library-path gaps upstream | the sharun fix is **upstreamed** ([Anylinux-sharun@`54208d2`](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537)) and the patch here is deleted. What that change does not reach is musl's `/etc/ld-musl-<arch>.path`, multiarch triplets past three, and the non-FHS prefixes; `analysis/ground-truth.md` has the measurement | a different repository, and section 8 forbids writing there |
 
@@ -863,6 +871,14 @@ died on `Exec format error`. Adding the host's library directories to every GL
 case made `glxgears` render on Alpine **with no shim at all**, through the X
 server's own GLX -- which would have looked like a triumph and was the controls
 quietly ceasing to control anything.
+
+⭐ **The single most promising thing left, and it is not on any list.**
+`plugin_boundaries.py` against the gtk4 AppDir reports **nine UNCLASSIFIED
+loaders**, and one of them is `libepoxy.so.0` -- a GL entry-point loader, the
+same DISPATCHER shape as libglvnd, sitting directly in the path of the
+application this session used to find its last bug. It is almost certainly why
+gtk4-demo's counts came out 1 GL and 46 GLES. Nobody has looked at it. 4.2 has
+the row.
 
 **What the next session should NOT redo:**
 
