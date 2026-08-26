@@ -20,7 +20,7 @@ Every claim is either backed by a command whose output is quoted, or labelled
 | Completion criterion | Status |
 |---|---|
 | Both goals demonstrated by a test that fails before and passes after | **Yes.** Goal 1: E5, E12. Goal 2: E22/E23 for the mechanism, E30/E32 and E37a/E37 for the end-to-end |
-| The evidence harness still reports all predictions held | **Yes, 31/31**, up from 22/22, with 9 new cases. The AppImage suite adds 31 on a glibc host and 25 on a musl host, with every unrunnable case SKIPPED by the capability it lacks |
+| The evidence harness still reports all predictions held | **Yes, 36/36**, up from 22/22. The AppImage suite adds 40 on a glibc host and 35 on a musl host, with every unrunnable case SKIPPED by the capability it lacks |
 | No host file modified, verified by checksum | **Yes.** T4.3, identical sha256 before and after |
 | Bundled libraries still win, verified via `dladdr` | **Yes.** T4.2, all resolved under `$APPDIR` |
 | A forward-compatibility story that does not depend on foresight | **Yes.** Host-runtime selection for the unenumerable gap, a generated shim for the enumerable one, and a build-time audit (E26) for the version traps |
@@ -678,11 +678,19 @@ it did not.
 
 #### `glxgears`, the OpenGL path
 
-Runs on a glibc host (**E38**, `GL_RENDERER = llvmpipe`). **SKIPPED on Alpine**,
-with the specific missing capability: Alpine's `mesa-gl` is classic Mesa, not
+**This paragraph used to end "no loader shim can supply a file the distribution
+does not ship", and that sentence was wrong.** It is kept here, corrected, rather
+than quietly rewritten, because the way it was wrong is the most transferable
+thing in this report.
+
+What was measured, and is still true: Alpine's `mesa-gl` is classic Mesa, not
 libglvnd, so there is no `libGLX_<vendor>.so.0` for the AppImage's bundled
-libglvnd to `dlopen`. That is host packaging, not libc, and no loader shim can
-supply a file the distribution does not ship.
+libglvnd to `dlopen`. That is host packaging, not libc.
+
+What was asserted and never tested: that this made it unfixable. A shim cannot
+supply the missing *file*, but it can replace the object that was looking for
+it. `glxgears` now renders on Alpine's classic Mesa, and so does everything else
+`glprobe` exercises. Section 9 is the whole chain.
 
 ---
 
@@ -923,9 +931,16 @@ is what settles it:
 
 E53 hands sharun the conf-derived directories through its own
 `SHARUN_FALLBACK_LIBRARY_PATH` -- no file edited, nothing patched -- and the
-AppImage renders on the GPU. All three sightings are one computation, and it is
-the one [`patches/sharun-library-path.patch`](patches/sharun-library-path.patch)
-already implements.
+AppImage renders on the GPU. All three sightings are one computation, and that
+computation now lives **upstream**:
+[pkgforge-dev/Anylinux-sharun@`54208d2`](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537) adds the `/usr/local/*`
+directories and appends the ones it scrapes out of `/etc/ld.so.cache`. The
+patch this repository carried is deleted rather than kept in parallel. What that
+change does not reach -- musl's `/etc/ld-musl-<arch>.path`, the multiarch
+triplets past three, and the non-FHS prefixes -- is recorded in
+[`analysis/ground-truth.md`](analysis/ground-truth.md) with the measurement
+behind it, because a cache scrape can only name a directory that held a library
+when `ldconfig` last ran.
 
 ### 7.4 The cross-libc ABI, measured
 
@@ -1121,11 +1136,13 @@ wrong.
 
 ### Tier 1, the evidence table
 
-`experiments/run.ps1` reports **31/31 predictions held**. E1 through E13
+`experiments/run.ps1` reports **36/36 predictions held**. E1 through E13
 measure the problem. E14 through E21 are one per fix from the first pass: the
 ELF self-test, the generated-shim compile and behaviour, and five selector
 decisions including the mixed-set guard and its control. E22 through E29 are
-the version-binding trap and the reporting defects:
+the version-binding trap and the reporting defects; E54 through E58 are the
+three loader mechanisms section 9 rests on, each stated in objects small enough
+that the mechanism is the only thing being measured:
 
 | ID | What it pins |
 |---|---|
@@ -1138,24 +1155,36 @@ the version-binding trap and the reporting defects:
 | E26 | the audit: no glibc may add a trap `version-compat.c` neither forwards nor declines |
 | E28 | the report names the dependency that failed to open, instead of accusing the libc |
 | E29 | and the caller still gets ld.so's message, not one of the report's own `dlsym` misses |
+| E54 | a plugin's undeclared import cannot see its loader's closure when that closure was loaded `RTLD_LOCAL` |
+| E55 | its control: `RTLD_GLOBAL`, same two files, and it resolves |
+| E56 | preload constructors run in REVERSE of the `.preload` order |
+| E57 | its control: swap the two and the first line swaps, so it is the order and not the file |
+| E58 | a tail-jump trampoline forwards eight integer registers, nine float registers, a varargs call and a struct return without knowing any of their signatures |
 
 ### Tier 1b, the AppImage end-to-end suite
 
 `experiments/appimage.ps1` runs a real AppImage against a real host driver on
-two hosts and reports **31/31 on glibc** and **25/25 with six named skips on
-musl**. It fetches the demo AppImage once (sha256 verified), extracts it in a
-container because the payload is DwarFS, builds `src/` on the glibc 2.31 floor,
-builds the musl half of the ABI probe on Alpine, and then measures E30 through
-E53 on each host. Every case is run with the feature off and on, and against
-both the shipped `foreign-dlopen.so` and the one built from `src/`, because a
-one-sided result cannot tell a working fix from a fallback that was already
-happening.
+two hosts and reports **40/40 on glibc** with no skips and **35/35 with five
+named skips on musl**. It fetches the demo AppImage once (sha256 verified),
+extracts it in a container because the payload is DwarFS, builds `src/` on the
+glibc 2.31 floor, builds the musl half of the ABI probe on Alpine, and then
+measures E30 through E68 on each host. Every case is run with the feature off
+and on, and against both the shipped `foreign-dlopen.so` and the one built from
+`src/`, because a one-sided result cannot tell a working fix from a fallback
+that was already happening.
 
-The six skips on Alpine are named rather than counted: no libglvnd vendor
-library (E38), no host glibc runtime set to switch to (E51, E52), and no
-Vulkan-or-GL-on-D3D12 driver (E53a, E53, E53b). On a machine with no GPU at all
-the driver's own capability probe turns E41-E53 into skips as well, and the
-suite still passes -- that is the point of probing rather than assuming.
+The five skips on Alpine are named rather than counted: no host glibc runtime
+set to switch to (E51, E52), and no Vulkan-or-GL-on-D3D12 driver (E53a, E53,
+E53b). On a machine with no GPU at all the driver's own capability probe turns
+E41-E53 into skips as well, and the suite still passes -- that is the point of
+probing rather than assuming.
+
+**E38 is retired rather than renumbered.** It was `glxgears`, run on a host with
+a libglvnd vendor library and SKIPPED on one without, and its skip reason
+carried a verdict -- "no loader shim can supply a file the distribution does not
+ship" -- that was never tested and was wrong. E61 and E62 replace it by
+measuring BOTH host classes instead of declining to look at one of them. Section
+9.1 is why that distinction is worth a paragraph.
 
 ### Tier 2, 3 and 4
 
@@ -1170,7 +1199,10 @@ suite still passes -- that is the point of probing rather than assuming.
 | T2.7 | cache-only library found via `--library-path` | **PASS** (E13c) |
 | T3.1 | Alpine baseline fails before the fix | **PASS with a caveat**, below |
 | T3.2 | `vkcube` with the host driver | **PASS.** `Selected GPU 0: llvmpipe (LLVM 20.1.8)` on Alpine, feature on; `reported zero accessible devices` as shipped. Section 6.2 |
-| T3.3 | `glxgears` | **PASS** on a glibc host (E38). **SKIPPED** on Alpine: its Mesa is not libglvnd, see the skipped list |
+| T3.3 | `glxgears` | **PASS on both host classes.** On a glvnd host it always worked and still does (E61, E62). On Alpine's classic Mesa it failed with `couldn't get an RGB, Double-buffered visual` and now renders (E61, E62), through `gl-fwd.so`. Section 9 |
+| T3.4 | GL past the `glxgears` symbol set, with the frame read back | **PASS.** `glprobe` returns `64 128 191 255` from the pixel it cleared, on both host classes (E63, E64) |
+| T3.5 | EGL on a host with no glvnd EGL vendor | **PASS.** `eglprobe` goes from `EGL_NO_DISPLAY` to a working surfaceless context (E65, E66) |
+| T3.6 | every bundled loader classified | **PASS.** 8 objects import `dlopen`, 0 unclassified (E59) |
 | T3.4 | driver provenance is the host's | **PASS**, below |
 | T4.1 | exactly one libc family | **PASS.** glibc mapped, musl not, with the feature on (E35) |
 | T4.2 | bundled wins, via `dladdr` | **PASS** |
@@ -1263,14 +1295,16 @@ T1.7  PASS, with two live hazards named. The divergences are real --
       a loader shim. E50 fails if the count of live hazards ever changes.
       Section 7.4.
 
-T3.3  SKIPPED on Alpine - glxgears cannot run there for a reason that is not
-      libc: Alpine's mesa-gl is classic Mesa, not libglvnd, so no
-      libGLX_<vendor>.so.0 exists for the AppImage's bundled libglvnd to
-      dlopen. PASSES on a glibc host with libglvnd, in software (E38,
-      GL_RENDERER = llvmpipe) and on hardware (E53, GL_RENDERER = D3D12
-      (NVIDIA GeForce RTX 3050 Ti Laptop GPU)). No loader shim can supply a
-      file the distribution does not ship; unblocking this needs a musl
-      distro that ships libglvnd.
+T3.3  PASSES on both host classes, and this entry used to say the opposite.
+      Alpine's mesa-gl is classic Mesa, so no libGLX_<vendor>.so.0 exists for
+      the AppImage's bundled libglvnd to dlopen -- that part was measured and
+      is still true. The conclusion drawn from it, that no loader shim could
+      close the gap, was never tested and was wrong: src/gl-fwd.c replaces the
+      dispatcher instead of supplying its missing vendor, and glxgears renders
+      on Alpine (E61, E62), as does everything glprobe exercises past the 33
+      symbols glxgears imports (E63, E64). Still PASSES on a glibc host with
+      libglvnd, in software and on hardware (E53, GL_RENDERER = D3D12 (NVIDIA
+      GeForce RTX 3050 Ti Laptop GPU)). Section 9.
 
 T5.1  PARTIAL - no DRM render node, which is NOT the same as no GPU, which
       in turn is not the same as no hardware result. This machine has a
@@ -1318,19 +1352,422 @@ T5.3  SKIPPED - no aarch64 hardware. This machine is x86_64 (i7-12700H).
 
 ---
 
-## 9. Measured versus assumed
+## 9. The second boundary: a bundled dispatcher whose plugin the host lacks
+
+Everything in sections 3 through 8 is about **one** kind of gap. The bundled
+Vulkan loader `dlopen`s the host's ICD; the ICD was built against another libc;
+`foreign-dlopen.so` carries it across. The host had the driver all along and the
+only thing in the way was libc.
+
+This section is about a gap of a different kind, which was in the README for a
+whole session labelled "not fixable" and is now closed.
+
+### 9.1 The skip that carried a verdict
+
+None of this section would exist without
+[PR #2](https://github.com/Azathothas/dlopen-experiment/pull/2), which arrived
+from outside and pointed at a gap this repository had written off. The design
+here differs from it in five ways, each measured below, but the gap and the
+mechanism are its finding.
+
+The previous report recorded case E38 like this:
+
+```
+E38  SKIPPED  no libGLX_<vendor>.so.0 on this host; its Mesa is not libglvnd,
+              so the bundled libglvnd has no vendor to dlopen
+```
+
+and the README said, in the same breath:
+
+> No loader shim can supply a file the distribution does not ship.
+
+The **reason** was correct and measured. The **verdict** attached to it was
+neither. A SKIP is a statement about the environment -- this host lacks that
+capability -- and it is allowed to name the missing capability. It is not
+allowed to decide whether the gap is closable, because that is a claim about the
+design space and needs its own evidence. Welded together, the skip stopped being
+a question, and one line of untested prose kept OpenGL broken on every musl
+distro for the whole of the previous session.
+
+That is the process defect worth carrying forward, and section 9.10 is the
+mechanism that makes it harder to repeat.
+
+### 9.2 Two gaps, not one
+
+| | what is wrong | what fixes it |
+|---|---|---|
+| **G1, the libc gap** | the host has the plugin, it is nameable, and it was built against a libc the bundle is not | `foreign-dlopen.so`: rewrite the object so its version requirements stop mattering, drop the musl libc edge, bridge the imports |
+| **G2, the interface gap** | the host has the *capability* but ships nothing in the shape the bundled loader looks for | replace the bundled loader |
+
+Vulkan only ever exhibits G1, and that is a property of its design rather than
+luck: the loader/ICD boundary is thin and universal, every ICD exposes
+`vk_icdGetInstanceProcAddr`, and every distribution that has Vulkan ships one.
+
+OpenGL exhibits G2. The AppImage bundles libglvnd, which is a **dispatcher**: an
+application links `libGL.so.1`, and at first use `libGLX.so.0` behind it
+`dlopen`s a vendor library, `libGLX_<vendor>.so.0`. (Which of those two objects
+does the opening matters, and section 9.10 is about how easy it is to name the
+wrong one.) A host whose Mesa was built without glvnd -- every musl distro, and
+every pre-glvnd glibc distro such as Ubuntu 14.04 or Debian 8 -- ships no such
+file at all. There is nothing for `foreign-dlopen` to carry. The user sees:
+
+```
+Error: couldn't get an RGB, Double-buffered visual
+```
+
+which is a message about visuals, for a fault that is about neither visuals nor
+libc.
+
+### 9.3 What a shim that replaces a library has to export
+
+The repair is [`src/gl-fwd.c`](src/gl-fwd.c): an object built with SONAME
+`libGL.so.1` and preloaded, so ld.so binds the application's `DT_NEEDED` to it
+and never loads the bundled dispatcher. Its constructor picks a target and every
+entry point forwards there -- the host's classic `libGL.so.1` on a classic host,
+the **bundled** dispatcher on a glvnd host, where it works and the shim's job is
+to be invisible.
+
+The one correctness rule is that **it must export everything the object it
+replaces exports**, because anything less is `undefined symbol` for the first
+application that links a name outside the list. The bundled `libGL.so.1`
+(libglvnd 1.7.0, from the `__FILE__` strings it keeps -- `../libglvnd-v1.7.0/src/...`
+-- rather than from the `.so.1.7.0` suffix, which encodes the OpenGL ABI version
+and would have said the same thing for the wrong reason) exports **3470**
+functions.
+
+A hand-written subset is not a smaller version of this design, it is a different
+and worse one, and the difference is invisible from the outside. The 33-symbol
+column below is not a strawman: it is the shim proposed in
+[PR #2](https://github.com/Azathothas/dlopen-experiment/pull/2), which
+identified the mechanism correctly and forwarded exactly the set `glxgears`
+imports. Measured on Alpine 3.22, same AppDir, same `.preload`, two shims:
+
+```
+33 of 3470     GL_RENDERER : llvmpipe (LLVM 20.1.8, 256 bits)
+               glprobe: symbol lookup error: undefined symbol: glGetIntegerv
+3470 of 3470   GL_RENDERER : llvmpipe (LLVM 20.1.8, 256 bits)
+               readback rgba: 64 128 191 255 (want ~64 128 191 255)
+               OK: GL is complete
+```
+
+Both print a renderer. `glxgears` renders under both, because `glxgears` imports
+exactly 33 GL symbols and a shim written to make `glxgears` run passes a
+`glxgears`-shaped test. That is why [`tests/glprobe.c`](tests/glprobe.c) exists
+and why it **reads a pixel back**: a shim that exports a name but cannot forward
+it returns zero, the frame comes out black, and no amount of grepping for
+`GL_RENDERER` tells the two apart.
+
+So the list is generated. [`tools/gen_gl_fwd.py`](tools/gen_gl_fwd.py) reads the
+export table out of the bundled `libGL.so.1` itself; `make gl-syms-check` fails
+the build if the checked-in table and the bundled library disagree, and E60 runs
+that check against the real extracted AppDir on both hosts. A newer bundled
+libglvnd cannot add an entry point silently.
+
+### 9.4 Trampolines, not wrappers
+
+Each entry point is two instructions:
+
+```asm
+glClearColor:
+	endbr64
+	jmp *glfwd_tab+8*NNN(%rip)
+```
+
+not a C function with a hand-written prototype. This is not a micro-optimisation.
+A tail jump preserves every argument register, the return value and the varargs
+count in `%al`, so it forwards **any** signature correctly, including the ones
+nobody typed out; a prototype that disagrees with the real one corrupts
+arguments silently, and 3470 opportunities to get one wrong is not a risk worth
+carrying for a shim whose whole purpose is transparency.
+
+E58 pins the claim rather than asserting it, on the same trampoline shape the
+generator emits:
+
+```
+E58  OK: ints=204 floats=285.00 varargs=10 struct=[2..12]
+```
+
+Eight integer registers, nine float registers, a varargs call whose `%al`
+carries the float count, and a struct returned through hidden memory -- through
+a jump that knows none of their shapes.
+
+Three details that are load-bearing:
+
+- **Every slot is initialised to a stub that returns zero**, not to NULL, and it
+  is initialised statically rather than in the constructor. A NULL slot is a
+  crash inside a GL call with no explanation, and a constructor-filled table has
+  an ordering hazard (9.6) that a static initialiser does not.
+- **`endbr64` is spelled as bytes**, so the floor's assembler cannot be too old
+  for it, and the shims are built `-fcf-protection=full` so the object carries
+  the matching IBT property note. Without the note, a CET-enforcing host turns
+  indirect-branch tracking off for the whole process -- a mitigation quietly
+  lost rather than a crash, which is the worse of the two.
+- **The shim refuses to forward to itself.** Its SONAME *is* the name it
+  resolves, so anything that hands that name back -- ld.so matching a request
+  against the shim's own libname list, an `ANYLINUX_GL_HOST_DIR` pointing at the
+  preload's own directory, a future loader that dedups by SONAME after load --
+  would make every trampoline jump to itself. That is unbounded recursion inside
+  the first GL call, with a stack overflow for a diagnostic. One `dladdr` on the
+  first resolved pointer turns it into a sentence. E68 fires it deliberately:
+
+```
+ [gl-fwd.so] >> target /tmp/glfwd-self/libGL.so.1 -- host library
+ [gl-fwd.so] >> libGL.so.1: the target resolves back to this shim
+                (/w/AppDir/lib/gl-fwd.so); refusing to forward to ourselves,
+                all 3470 entry points return zero
+FAILED: no RGB double-buffered visual
+```
+
+  The last line is the application's own documented failure, which is the right
+  thing for it to see. A guard nobody has fired is a guard nobody knows the
+  shape of.
+
+### 9.5 `RTLD_GLOBAL`, asked for by the caller and not by everyone
+
+A plugin does not always declare everything it uses. It can import a symbol with
+**no** `DT_NEEDED` edge to whoever defines it and rely on its loader's closure
+being in the global scope -- which, for `libGL`, is where it sits natively,
+because the application has a `DT_NEEDED` on it. A loader that `dlopen`s `libGL`
+`RTLD_LOCAL` breaks that without touching either file, and the plugin fails with
+`undefined symbol` for a symbol that is present in the process.
+
+The reported instance is classic Mesa's DRI driver importing `_glapi_*` with no
+edge on `libglapi.so.0`. **That instance is not reproduced here**, and the last
+paragraph of this section says what was found instead. The mechanism is what is
+measured.
+
+E54 and E55 reproduce the mechanism in three objects of two lines each rather
+than by excavating a 2014 Mesa, because it is a property of `ld.so` and not of
+Mesa:
+
+```
+E54  FAIL  ./libplug.so: undefined symbol: prov_symbol      middle object RTLD_LOCAL
+E55  OK    plug_entry()=8                                   middle object RTLD_GLOBAL
+```
+
+Same two files, nothing else changed.
+
+`gl-fwd` therefore passes `RTLD_GLOBAL` when **it** opens the host `libGL`, and
+`fgn_attempt` is unchanged. Making every foreign `dlopen` global would cover the
+same case and would additionally put every host ICD's exports in the global
+scope ahead of libraries loaded later -- a win over bundled definitions that
+they do not have natively either, and a direct erosion of T4.2. The narrow
+version reproduces the native shape exactly and nothing more.
+
+And the instance, measured on the two Mesas available here:
+
+```
+alpine:3.22  Mesa 25.1  no libglapi.so.0 on the system at all; libGL defines no
+                        _glapi_* and depends on libgallium-25.1.9.so instead
+alpine:3.15  Mesa 21.2  libglapi.so.0 exists, swrast_dri.so imports 9 _glapi_*
+                        symbols AND carries libglapi.so.0 in its DT_NEEDED
+```
+
+So neither needs the global scope for this. The report that a DRI driver still
+relies on it is against Mesa 10.1, comes from outside this repository, and is
+plausible -- the `DT_NEEDED` edge is a later addition -- but it is not
+reproduced here and is not adopted as if it were. What justifies the flag is
+E54/E55 plus the fact that `RTLD_GLOBAL` is what a `DT_NEEDED libGL` has
+natively: the shim is reproducing a shape, not working around a bug.
+
+### 9.6 Preload constructors run in reverse
+
+`gl-fwd`'s constructor `dlopen`s a host library, and a host object whose musl
+libc edge was dropped needs the bundled libc runtime set that
+`foreign-dlopen.so`'s constructor puts in the global scope. So the order matters,
+and the intuitive answer is wrong:
+
+```
+E56  --preload "A B"   ->  ctor-B first
+E57  --preload "B A"   ->  ctor-A first
+```
+
+ld.so runs preload constructors in **reverse** of the list. Listing `gl-fwd.so`
+after `foreign-dlopen.so` -- which is what a reader would write, and what the
+obvious packaging note says -- runs it **first**.
+
+E57 is not redundant with E56: without it, "reverse order" cannot be
+distinguished from "B always happens to go first".
+
+Rather than depend on an ordering nobody documents, `foreign-dlopen.so` exports
+an idempotent `foreign_dlopen_init_now()` and `gl-fwd` calls it before its first
+`dlopen`. The `.preload` order is then free, and the reason it is free is
+written down instead of discovered again.
+
+### 9.7 End to end, on both host classes
+
+The point of measuring both is that they fail in opposite directions. On a
+classic-Mesa host the shim is the only thing that makes GL work; on a glvnd host
+GL already worked and the shim's job is to change nothing.
+
+**alpine:3.22, musl, classic Mesa 25.1, no glvnd vendor library:**
+
+| | no shim | with the shim |
+|---|---|---|
+| `glxgears` | `Error: couldn't get an RGB, Double-buffered visual` (E61) | `GL_RENDERER = llvmpipe (LLVM 20.1.8)` (E62) |
+| `glprobe` | `FAILED: no RGB double-buffered visual` (E63) | `OK: GL is complete`, readback `64 128 191 255` (E64) |
+| `eglprobe` | `FAILED: eglGetDisplay -> EGL_NO_DISPLAY` (E65) | `OK: EGL is complete` (E66) |
+| `vkcube` | -- | `Selected GPU 0: llvmpipe` (E67) |
+
+**debian:trixie-slim, glibc 2.41, glvnd:**
+
+| | no shim | with the shim |
+|---|---|---|
+| `glxgears` | `GL_RENDERER = llvmpipe (LLVM 19.1.7)` (E61) | unchanged (E62) |
+| `glprobe` | `OK: GL is complete` (E63) | unchanged (E64) |
+| `eglprobe` | `OK: EGL is complete` (E65) | unchanged (E66) |
+| `vkcube` | -- | `Selected GPU 0: llvmpipe` (E67) |
+
+E65 is worth reading twice. With **only** the GL shim loaded, EGL still fails on
+the classic host: the two dispatchers have independent vendor-discovery
+mechanisms -- a `libGLX_*.so.0` for GL, a JSON file under
+`/usr/share/glvnd/egl_vendor.d` for EGL -- so they are genuinely two boundaries
+and fixing one does not fix the other. `egl-fwd.so` is the same source file built
+with a different table and a different vendor marker.
+
+E67 is the regression case: the shims are preloaded for every binary in the
+AppDir, `vkcube` included, and the Vulkan path is unaffected.
+
+Totals with this section in: **35/35 on the musl host** with five named skips,
+**40/40 on the glibc host** with none, and **36/36** in the container suite.
+
+### 9.8 What the shim does not do, stated as a number
+
+On Alpine 3.22 the split is:
+
+```
+libGL.so.1: 2373 of 3470 entry points resolved from the host library
+            (1357 exported, 1016 via glXGetProcAddressARB, 1097 absent)
+```
+
+`dlsym` alone finds 1357. Half of what glvnd exports are extension entry points
+that classic Mesa implements without putting them in `.dynsym`, and the designed
+way to reach those has always been `glXGetProcAddress`; asking it for the misses
+adds 1016. The remaining **1097 are extensions this Mesa does not implement at
+all** -- vendor extensions glvnd knows the names of and Mesa 25.1 has no code
+for. They forward to the zero-returning stub.
+
+That is the same answer an application would get natively on that host, where
+those names are equally absent. But the number is a property of the host's Mesa,
+not of this shim, so the shim reports the split under `ANYLINUX_LIB_DEBUG=1`
+rather than presenting 2373 as a score. On the glvnd host the same line reads
+`3470 of 3470 ... (3470 exported, 0 via glXGetProcAddressARB, 0 absent)`, which
+is what transparency looks like when it is measured instead of asserted.
+
+### 9.9 What it costs a process that never calls GL
+
+The shims are preloaded for every binary in the AppDir, so a Vulkan-only run
+loads the host GL stack and never touches it. That is a real cost and it is
+measured rather than waved at -- alpine:3.22, `vkprobe`, best of three:
+
+```
+no shims    0.24 s wall   230 MB max RSS
+both shims  0.27 s wall   260 MB max RSS
+```
+
+30 ms and 30 MB, which is the host Mesa closure being mapped. It could be
+avoided with a gate -- "does anything in this process have a `DT_NEEDED` on the
+soname I am impersonating" -- and that gate was deliberately not written,
+because answering it means walking every loaded object's dynamic section, and
+`d_ptr` in a mapped `PT_DYNAMIC` may be absolute or link-time depending on the
+port (section 7.3). Trading a measured 30 MB for an unmeasured segfault class is
+not a trade worth making.
+
+The packaging answer is better anyway: an AppImage with no GL application in it
+does not list the shims in `.preload`. That is a decision the person building
+the AppDir can make correctly and the shim cannot.
+
+### 9.10 The generalisation, and the tool that makes it a measurement
+
+The OpenGL gap survived a session because finding it required somebody to
+*wonder* whether libglvnd was a loader. That should not depend on wondering: a
+bundled object that imports `dlopen` is a loader by construction, and the set of
+them is a property of the bundle that can be read off it.
+
+[`tools/plugin_boundaries.py`](tools/plugin_boundaries.py) does exactly that, and
+E59 runs it against the extracted AppDir with `--check`, which fails on any
+loader that is not classified. The demo AppDir has eight:
+
+```
+covered     libvulkan.so.1      ICD from /usr/share/vulkan/icd.d      (E30-E37)
+covered     libGLX.so.0         glvnd's vendor dlopen                 (E61-E64)
+covered     libEGL.so.1         glvnd EGL -> egl_vendor.d             (E65, E66)
+unmeasured  libX11.so.6         loadable i18n modules, on a build with them
+n/a         libGLdispatch.so.0  glvnd internal dispatch, no host plugin
+n/a         libdecor-0.so.0     libdecor-rs: decorations linked in
+n/a         vkcube, vkmark      dlopen the BUNDLED libvulkan/libX11/libxcb
+```
+
+Two of those rows are the argument for the tool.
+
+**`libGL.so.1` is not on the list, and that is the correct answer.** The object
+that actually `dlopen`s the vendor library is `libGLX.so.0`; glvnd's
+`libGL.so.1` is a re-export layer over it and imports no `dlopen` at all. A
+human enumerating "which bundled libraries load host plugins" writes down
+`libGL.so.1`, because that is the name in the failure. The tool writes down the
+object that does the loading.
+
+**`libdecor-0.so.0` is on the list because the tool found it**, not because
+anyone thought of it. It turned out to be benign -- `libdecor-rs`, with the
+decoration plugins linked in, so its only `dlopen` is a lazy one for the bundled
+`libwayland-client.so.0` -- but "benign, checked" and "never looked at" are
+different states and only one of them was true before.
+
+The third verdict, **`unmeasured`**, exists for the same reason and is
+deliberately not folded into either of the others. `libX11.so.6` can load i18n
+modules from `/usr/lib/X11/locale` when it is built with them; nothing here has
+run that. Calling it `covered` because it is "just another host object" is the
+exact move that produced the OpenGL gap, and a state with no word for it becomes
+invisible again.
+
+The table also carries the boundaries this AppDir does **not** have, so that an
+AppImage which bundles them is classified on sight rather than investigated from
+scratch: `libva.so.2` (`<name>_drv_video.so` from `/usr/lib/dri`),
+`libvdpau.so.1`, `libasound.so.2` (ALSA plugins), `libOpenCL.so.1`
+(`/etc/OpenCL/vendors`), `libgbm.so.1`. Each is the same shape as the OpenGL one
+and none of them is a libc problem. They are named, not fixed.
+
+---
+
+## 10. Measured versus assumed
 
 **Measured:** every table and quoted output above, plus `experiments/run.ps1`
-(31/31), `experiments/appimage.ps1` (31/31 glibc, 25/25 musl with six named
+(36/36), `experiments/appimage.ps1` (40/40 glibc, 35/35 musl with five named
 skips), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
-the corpus test, and the compiled-and-run sharun patch.
+the corpus test, and the five-distro `ld.so.cache` survey in
+`analysis/ground-truth.md`.
 
 **Assumed or UNVERIFIED:**
 
-- The three tests still skipped above: `glxgears` on a musl host (T3.3),
-  hardware **Vulkan** and the DRM-native drivers (T5.1), the proprietary
-  **graphics** driver (T5.2), and aarch64 (T5.3). Each names what would unblock
-  it, and none of them is unblockable from this machine.
+- The tests still skipped above: hardware **Vulkan** and the DRM-native drivers
+  (T5.1), the proprietary **graphics** driver (T5.2), and aarch64 (T5.3). Each
+  names what would unblock it, and none of them is unblockable from this
+  machine. T3.3, `glxgears` on a musl host, is no longer among them.
+- **The aarch64 trampolines in `src/gl-fwd.c` are assembled, never run.**
+  `make gl-fwd-asm-check` (needs `gcc-aarch64-linux-gnu` **and**
+  `libc6-dev-arm64-cross`) produces the right instructions and the right
+  relocations --
+
+```
+0000000000000c20 <glClearColor>:
+     c20: d503245f  bti  c
+     c24: 90000010  adrp x16, 0
+          R_AARCH64_ADR_PREL_PG_HI21  glfwd_tab+0x608
+     c28: f9400210  ldr  x16, [x16]
+```
+
+  -- and `0x608` is `8 * 193`, which is `glClearColor`'s index in the table. So
+  the addressing is right. Nothing has executed it. "It assembles" is a weaker
+  claim than "it works" and this is the only place the distinction is recorded.
+- **The `_glapi_tls_Dispatch` case that motivates `gl-fwd`'s `RTLD_GLOBAL` was
+  not reproduced on a shipping Mesa here.** The mechanism is measured (E54,
+  E55); the report that a real DRI driver still relies on it is against Mesa
+  10.1 and comes from outside this repository. Alpine 3.22's Mesa has no
+  separate `libglapi.so.0`, and Alpine 3.15's `swrast_dri.so` carries the
+  `DT_NEEDED` edge. Section 9.5.
+- **1097 of 3470 GL entry points are unresolvable on Alpine's Mesa** and
+  forward to a stub that returns zero. That matches what an application would
+  get natively on that host, but no application here has called one.
 - **T1.6 was not run under a thread sanitiser.** The crossings are exercised and
   bounded by a timeout, which catches a broken binding; it does not catch a race
   that happens not to fire.
@@ -1349,7 +1786,7 @@ the corpus test, and the compiled-and-run sharun patch.
 
 ---
 
-## 10. Known unfixed and out of scope
+## 11. Known unfixed and out of scope
 
 **Case 3, a glibc-built host library loading into a musl process, is out of
 scope and not addressed.** The packaging always bundles glibc deliberately,
@@ -1371,7 +1808,7 @@ sonames.
 
 ---
 
-## 11. Residual risk
+## 12. Residual risk
 
 1. **The version-trap set is per-libc and computed, not universal.**
    `version-compat.c` covers what `tools/version_traps.py` finds in the libc it

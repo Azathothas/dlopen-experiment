@@ -1,7 +1,8 @@
-# Verdict on the two rejected designs
+# Verdict on the rejected designs
 
-Both were evaluated on paper. Neither was implemented. Both verdicts are backed
-by measurements in this repo, not by preference.
+Each was evaluated before the design that replaced it was written. None was
+implemented. Every verdict is backed by a measurement in this repo, not by
+preference.
 
 ---
 
@@ -122,3 +123,59 @@ This becomes justified if, and only if, one of these is measured:
   not optional and the right answer is to **use** Solo rather than rewrite it.
 
 Until one of those is on the table there is nothing to justify it with.
+
+---
+
+## A glvnd VENDOR library, instead of replacing the dispatcher
+
+**Verdict: rejected. It solves the same problem with a harder interface, and
+the interface is private.**
+
+The OpenGL gap (REPORT.md 9) is that the AppImage bundles libglvnd's
+`libGL.so.1`, a dispatcher that `dlopen`s a vendor library
+`libGLX_<vendor>.so.0`, and a host whose Mesa was built without glvnd ships no
+such file. Two repairs are available:
+
+- **(A) replace the dispatcher.** Ship an object with SONAME `libGL.so.1`,
+  preload it, let ld.so bind the application's `DT_NEEDED` to it, and forward
+  every entry point to the host's classic `libGL.so.1`. This is
+  [`src/gl-fwd.c`](../src/gl-fwd.c).
+- **(B) supply the missing vendor.** Ship `libGLX_mesa.so.0` implementing
+  glvnd's vendor ABI on top of the host's classic `libGL.so.1`, and leave the
+  bundled dispatcher in place.
+
+(B) is the more respectful of the two -- it keeps the bundled dispatcher's full
+ABI and needs no symbol enumeration at the application boundary. It was
+rejected for three reasons, in order of weight:
+
+1. **The vendor ABI is private and versioned.** A vendor library exports
+   `__glx_Main(version, exports, vendor, imports)` and is handed a struct of
+   function pointers whose layout is an internal contract between libglvnd
+   releases, guarded by `__GLX_VENDOR_ABI_MAJOR/MINOR`. The SONAME that (A)
+   takes over is a public ABI that has not changed since 1998.
+
+2. **It does not avoid the enumeration.** glvnd asks a vendor for the dispatch
+   address of every GL function it is asked about, so (B) needs the same list
+   of entry points that (A) needs, plus the vendor-ABI plumbing around it. The
+   list is generated either way ([`tools/gen_gl_fwd.py`](../tools/gen_gl_fwd.py));
+   (B) is (A) plus a second interface.
+
+3. **It fixes GL and not EGL.** EGL's vendor discovery is a different mechanism
+   -- JSON files under `/usr/share/glvnd/egl_vendor.d` naming
+   `libEGL_<vendor>.so.0` -- so (B) would need a second, differently shaped
+   implementation. (A) is the same source file built twice with a different
+   table and a different vendor marker, which is what `egl-fwd.so` is.
+
+The cost of (A), stated plainly because it is real: the shim must export
+everything the object it replaces exports, or an application that links a name
+outside the list fails with `undefined symbol`. That is 3470 entry points for
+`libGL.so.1`. It is only tolerable because the list is READ OUT of the bundled
+library rather than typed, and because `make gl-syms-check` fails the build if
+the two ever disagree. A hand-written subset is the failure mode, not the
+design: measured at 33 of 3470, `glxgears` renders and `glGetIntegerv` is an
+undefined symbol (REPORT.md 9.3).
+
+### When to revisit
+
+If libglvnd ever ships a stable, documented vendor ABI, (B) becomes the better
+answer and this decision should be reversed. Nothing else changes it.
