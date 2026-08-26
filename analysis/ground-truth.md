@@ -201,5 +201,43 @@ Input to the sharun patch.
 | arch | yes | no | no | empty in the base image | present |
 
 `/usr/local/lib` exists on **all eight** and was absent from sharun's hardcoded
-list. That is the concrete bug E13b demonstrates, and what
-`patches/sharun-library-path.patch` fixes.
+list. That is the concrete bug E13b demonstrates, and it is **fixed upstream**:
+[pkgforge-dev/Anylinux-sharun@`54208d2`](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537) adds `/usr/local/lib`,
+`/usr/local/lib32` and `/usr/local/lib64` to the hardcoded list and appends the
+directories it scrapes out of `/etc/ld.so.cache`. The patch that used to live in
+`patches/` here has been deleted rather than carried, because a hand-applied
+patch against a moving upstream drifts from what the AppImage actually ships.
+
+**What the cache reaches, measured rather than assumed.** "Read the real cache,
+it is authoritative" is the natural reading of that change and it is not quite
+right: `ldconfig` records a directory only if it held a library when the cache
+was last built, so a present-but-empty directory is invisible to a cache scrape
+even when `/etc/ld.so.conf` names it. Base images of five distros:
+
+| host | `/etc/ld.so.cache` | dirs from the cache | dirs from `ld.so.conf` | named by conf, absent from the cache |
+|---|---|---|---|---|
+| alpine 3.22 | **absent** | 0 | no such file | -- |
+| debian trixie | present | 1 | 3 | `/usr/lib/<triplet>`, `/usr/local/lib` |
+| ubuntu 24.04 | present | 1 | 3 | `/usr/lib/<triplet>`, `/usr/local/lib` |
+| fedora 41 | present | 1 | 0 | -- |
+| arch | present | 1 | 0 | -- |
+
+A base image is the weakest case for the cache -- everything lives in one
+directory -- so this understates it on a real desktop, where the cache is what
+names a Gentoo `/usr/lib/llvm/N/lib64` or a WSL `/usr/lib/wsl/lib`. The point is
+narrower: the two mechanisms are **complementary**, and upstream covers the
+`/usr/local/*` half by hardcoding it rather than by reading the cache.
+
+Three things the deleted patch did that upstream does not, recorded so they are
+not lost:
+
+- `/etc/ld-musl-<arch>.path`, which is the musl equivalent of `ld.so.conf`.
+  No musl host has an `ld.so.cache` at all, so the cache scrape is dead there.
+  Narrower than it sounds: Alpine 3.22 ships no such file either, and musl's
+  built-in default is `/lib:/usr/local/lib:/usr/lib`, all three of which
+  upstream now has. It bites only a musl host that has been given an explicit
+  path file.
+- multiarch triplets past x86-64, i386 and aarch64 -- riscv64, ppc64le, s390x,
+  loongarch64 -- which the cache covers only where a cache exists.
+- `/usr/libexec`, Guix's `/run/current-system/profile/lib`, Flatpak's
+  `/app/lib` and Termux's prefix, none of which has a cache.
