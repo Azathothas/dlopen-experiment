@@ -26,11 +26,13 @@ XA='-screen 0 1024x768x24 +extension GLX +extension RANDR +render'
 # is missing, the AppDir has been used before and lib/foreign-dlopen.so is
 # whatever the last run left there -- copying that as "upstream" would quietly
 # run the entire A/B against the patched build twice and report it as a pass.
-if [ ! -f "$LP/foreign-dlopen.upstream.so" ]; then
-    echo "  FATAL: $LP/foreign-dlopen.upstream.so is missing."
-    echo "  The AppDir is stale. Delete .tmp/AppDir and re-run so extraction"
-    echo "  can preserve the shipped shim; without it the 'as shipped' cases"
-    echo "  would silently measure the patched build."
+if [ ! -f "$LP/foreign-dlopen.upstream.so" ] || [ ! -f "$APPDIR/.preload.shipped" ]; then
+    echo "  FATAL: $LP/foreign-dlopen.upstream.so or $APPDIR/.preload.shipped is missing."
+    echo "  The AppDir is stale. Delete .tmp/AppDir and re-run so extraction can"
+    echo "  preserve BOTH the shipped shim and the shipped .preload; without the"
+    echo "  first the 'as shipped' cases silently measure the patched build, and"
+    echo "  without the second the OpenGL cases that must run with NO shim would"
+    echo "  run with whatever the last run left in .preload."
     exit 2
 fi
 
@@ -142,10 +144,10 @@ render_verdict_hw() {          # render_verdict_hw <0|1> <extra-dirs> <bin> [arg
 }
 
 # The directories the DISTRO itself names, read out of the plain-text
-# /etc/ld.so.conf. This is the same computation as host_library_dirs() in
-# patches/sharun-library-path.patch and as rs_conf_dirs() in
-# src/runtime-select.c; a shell stand-in here so the cases can show what the
-# path is missing without building sharun.
+# /etc/ld.so.conf. This is the same computation as rs_conf_dirs() in
+# src/runtime-select.c, and the counterpart of get_ld_cache_dirs() that sharun
+# now does upstream; a shell stand-in here so the cases can show what the path
+# is missing without building sharun.
 conf_dirs() {
     awk '{sub(/#.*/,"")} NF' /etc/ld.so.conf 2>/dev/null | while read -r kw rest; do
         if [ "$kw" = include ]; then
@@ -269,7 +271,6 @@ echo
 echo "-- E. rendering ---------------------------------------------------"
 if ! command -v xvfb-run >/dev/null 2>&1; then
     skip E37 "no xvfb-run on this host: install xvfb"
-    skip E38 "depends on E37"
 else
     # E37a: vkcube exactly as the AppImage ships. This is the complaint.
     use_preload upstream
@@ -292,17 +293,12 @@ else
         XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" sh -c \
         "timeout 90 xvfb-run -a -s '$XA' $APPDIR/AppRun.sh vkcube --c 20 2>&1 | tail -4"
 
-    # The OpenGL path needs a libglvnd VENDOR library on the host, because the
-    # AppImage bundles libglvnd's libGL/libGLX/libGLdispatch and those dlopen
-    # libGLX_<vendor>.so.0. Alpine's mesa-gl is classic Mesa, not glvnd, so
-    # there is nothing for them to load: that gap is host packaging, not libc.
-    # Each glob is tested separately, because one `ls` over both fails as a
-    # whole when either pattern misses, which silently skipped this on Debian.
-    if ls /usr/lib/libGLX_*.so.0 >/dev/null 2>&1 || ls /usr/lib/*/libGLX_*.so.0 >/dev/null 2>&1; then
-        run E38 OK "GL_RENDERER" render_verdict glxgears -info
-    else
-        skip E38 "no libGLX_<vendor>.so.0 on this host; its Mesa is not libglvnd, so the bundled libglvnd has no vendor to dlopen"
-    fi
+    # E38 was here: glxgears, run on a host that has a libglvnd vendor library
+    # and SKIPPED on one that does not. It is retired rather than renumbered,
+    # because its skip reason carried a verdict -- "no loader shim can supply a
+    # file the distribution does not ship" -- that was never tested and turned
+    # out to be wrong. Section J replaces it with E61 and E62, which measure
+    # BOTH host classes instead of declining to look at one of them.
 fi
 
 # ------------------------------------ F. a CLOSED-SOURCE driver, real silicon
@@ -626,6 +622,194 @@ fi
 # Leave the AppDir holding the patched preload, so a later run that starts
 # mid-suite is not silently measuring upstream's.
 use_preload patched
+
+# --------------------------------- J. the OTHER boundary: a bundled DISPATCHER
+#
+# Everything above measures ONE boundary. The bundled Vulkan loader dlopens the
+# host's ICD; the ICD was built against another libc; foreign-dlopen.so carries
+# it across. That is a LIBC gap, and the host had the thing all along.
+#
+# The AppDir contains eight other objects that dlopen something (E59), and one
+# of them fails a different way. libglvnd's libGL.so.1 is a DISPATCHER: it
+# dlopens a VENDOR library, libGLX_<vendor>.so.0, and a host whose Mesa was
+# built without glvnd does not ship one AT ALL. No amount of libc bridging can
+# carry a file that does not exist. That is an INTERFACE gap, and the repair is
+# a different one: replace the bundled dispatcher (src/gl-fwd.c).
+#
+# This section was previously one line -- E38, SKIPPED, with the reason "that
+# gap is host packaging, not libc" and the verdict "not fixable from a loader
+# shim". The reason was true. The verdict was never tested, and it was wrong.
+echo
+echo "-- J. OpenGL: replacing a dispatcher whose vendor the host lacks ---"
+
+# Which class of host is this? The bundled dispatcher needs a vendor library;
+# if the host has one it works as shipped, and the shim's job is to be
+# invisible. If not, the shim is the only thing that makes GL work at all.
+# Each glob is tested separately: `ls a b` fails as a whole when either misses.
+if ls /usr/lib/libGLX_*.so.0 >/dev/null 2>&1 || ls /usr/lib/*/libGLX_*.so.0 >/dev/null 2>&1; then
+    GLHOST=glvnd
+else
+    GLHOST=classic
+fi
+echo "  host GL stack: $GLHOST$([ $GLHOST = classic ] && echo ' (no libGLX_<vendor>.so.0 anywhere)')"
+
+# The .preload file drives which shims the AppRun loads. Restore it from the
+# copy 41-extract.sh kept, so a case whose whole point is the shim's ABSENCE
+# cannot silently run with it present.
+use_gl_shims() {               # use_gl_shims [gl] [egl]
+    cp "$APPDIR/.preload.shipped" "$APPDIR/.preload"
+    rm -f "$LP/gl-fwd.so" "$LP/egl-fwd.so"
+    for s in "$@"; do
+        case "$s" in
+            gl)  cp /w/build/gl-fwd.so  "$LP/gl-fwd.so";  echo gl-fwd.so  >> "$APPDIR/.preload" ;;
+            egl) cp /w/build/egl-fwd.so "$LP/egl-fwd.so"; echo egl-fwd.so >> "$APPDIR/.preload" ;;
+        esac
+    done
+}
+
+# A GL binary never exits on its own, so `timeout` kills xvfb-run and leaves
+# the child holding the stdout pipe: a $( ) capture then hangs forever ON THE
+# CASE THAT WORKED. Write to a file and reap instead. glprobe and eglprobe do
+# exit, which is most of why they exist.
+gl_run() {                     # gl_run <keep-exit-code:0|1> <binary> [args...]
+    keep="$1"; shift
+    : > /tmp/gl_case.out
+    env ANYLINUX_LIB_FOREIGN_DLOPEN=1 APPDIR="$APPDIR" LIBGL_ALWAYS_SOFTWARE=1 \
+        EGL_PLATFORM=surfaceless \
+        timeout -k 2 30 xvfb-run -a -s "$XA" "$APPDIR"/AppRun.sh "$@" \
+        > /tmp/gl_case.out 2>&1 </dev/null
+    rc=$?
+    pkill -9 glxgears 2>/dev/null; pkill -9 Xvfb 2>/dev/null
+    rm -f /tmp/.X*-lock 2>/dev/null
+    # A probe states its verdict on a line of its OWN, and that line comes
+    # first. Reaching for GL_RENDERER ahead of it is how a 33-of-3470 shim
+    # scores a pass: it prints a renderer and dies two calls later on a symbol
+    # the renderer line says nothing about.
+    grep -m1 -E '^(OK|FAILED)' /tmp/gl_case.out ||
+    grep -m1 -E 'Selected GPU|GL_RENDERER|couldn.t get|undefined symbol|EGL_NO_DISPLAY' \
+        /tmp/gl_case.out ||
+    echo "no recognisable output"
+    [ "$keep" = 1 ] && return $rc
+    return 0
+}
+# The probes exit, so their status IS the measurement.
+gl_verdict() { gl_run 1 "$@"; }
+# glxgears never exits, and vkcube exits 0 whether or not it found a device, so
+# for those the exit code carries nothing and only the output does. Predicting
+# on it would score the timeout that ENDS a successful render as a failure.
+gl_render() { gl_run 0 "$@"; }
+
+if ! command -v python3 >/dev/null 2>&1; then
+    skip E59 "no python3 on this host: the boundary scan is a python tool"
+    skip E60 "as E59"
+else
+    # E59: every bundled object that imports dlopen is classified. An
+    #      UNCLASSIFIED one is a boundary nobody has looked at, which is exactly
+    #      how the OpenGL gap survived a whole session with a SKIP on it.
+    run E59 OK "UNCLASSIFIED 0" python3 /repo/tools/plugin_boundaries.py "$APPDIR" --check
+    # E60: the forwarding tables are read out of the bundled libglvnd, so a
+    #      newer bundled libglvnd with a new entry point must not go unnoticed:
+    #      the shim would export less than the object it replaces.
+    run E60 OK "matches" sh -c \
+        "cd /repo/src && python3 /repo/tools/gen_gl_fwd.py $LP/libGL.so.1 \
+             --prefix gl --soname libGL.so.1 --check gl-fwd-gl.h"
+fi
+
+if ! command -v xvfb-run >/dev/null 2>&1; then
+    for c in E61 E62 E63 E64 E65 E66 E67 E68; do skip $c "no xvfb-run on this host"; done
+elif [ ! -f /w/build/gl-fwd.so ] || [ ! -f /w/build/glprobe ]; then
+    for c in E61 E62 E63 E64 E65 E66 E67 E68; do
+        skip $c "gl-fwd.so or glprobe was not built on the floor"
+    done
+else
+    # The probes have to run the way the AppImage's own binaries do -- through
+    # sharun, under the bundled loader, with the .preload applied -- or they are
+    # measuring a different process from the one under test. sharun dispatches
+    # on the name it was invoked as, so a copy of it in bin/ with the probe's
+    # name and the real binary in shared/bin/ is the whole installation.
+    for p in glprobe eglprobe; do
+        cp "/w/build/$p" "$APPDIR/shared/bin/$p"
+        cp "$APPDIR/sharun" "$APPDIR/bin/$p" 2>/dev/null ||
+            ln -sf ../sharun "$APPDIR/bin/$p"
+    done
+    # E61/E62: glxgears, the case the README recorded as not done. On a classic
+    #          host E61 is the failure users report; on a glvnd host it already
+    #          worked and E61 says so, which is what makes E62 a regression test
+    #          rather than a repeat.
+    use_gl_shims
+    if [ "$GLHOST" = classic ]; then
+        run E61 OK "couldn't get an RGB" gl_render glxgears -info
+    else
+        run E61 OK "GL_RENDERER" gl_render glxgears -info
+    fi
+    use_gl_shims gl
+    run E62 OK "GL_RENDERER" gl_render glxgears -info
+
+    # E63/E64: glxgears links 33 of the 3470 entry points libGL.so.1 exports, so
+    #          a shim written to make glxgears run passes E62 and nothing else.
+    #          glprobe calls past that set AND reads a pixel back, which is the
+    #          difference between "the symbol existed" and "the call arrived".
+    use_gl_shims
+    if [ "$GLHOST" = classic ]; then
+        run E63 FAIL "FAILED: no RGB double-buffered visual" gl_verdict glprobe
+    else
+        run E63 OK "OK: GL is complete" gl_verdict glprobe
+    fi
+    use_gl_shims gl
+    run E64 OK "OK: GL is complete" gl_verdict glprobe
+
+    # E65/E66: EGL is the same dispatcher shape with a different vendor marker
+    #          (a JSON directory, not a libGLX_*.so.0), and it is INDEPENDENT:
+    #          the GL shim alone does not fix it, which is the measurement that
+    #          says these really are two boundaries and not one.
+    use_gl_shims gl
+    if [ "$GLHOST" = classic ]; then
+        run E65 FAIL "FAILED: eglGetDisplay" gl_verdict eglprobe
+    else
+        run E65 OK "OK: EGL is complete" gl_verdict eglprobe
+    fi
+    use_gl_shims gl egl
+    run E66 OK "OK: EGL is complete" gl_verdict eglprobe
+
+    # E67: and none of it costs the Vulkan path anything. The shims are
+    #      preloaded for every binary in the AppDir, vkcube included.
+    run E67 OK "Selected GPU" gl_render vkcube --c 20
+
+    # E68: the shim carries the SONAME it impersonates, so anything that
+    #      resolves that name back to the shim would make every trampoline jump
+    #      to itself -- unbounded recursion inside the first GL call, with a
+    #      stack overflow for a diagnostic. Pointed straight at itself here, it
+    #      says so and leaves the table absent, and the application gets its own
+    #      documented failure instead. A guard that has never been fired is a
+    #      guard nobody knows the shape of.
+    use_gl_shims gl
+    mkdir -p /tmp/glfwd-self
+    ln -sf "$LP/gl-fwd.so" /tmp/glfwd-self/libGL.so.1
+    : > /tmp/gl_case.out
+    env ANYLINUX_LIB_FOREIGN_DLOPEN=1 APPDIR="$APPDIR" ANYLINUX_LIB_DEBUG=1 \
+        ANYLINUX_GL_HOST_DIR=/tmp/glfwd-self ANYLINUX_GL_FWD_TARGET=host \
+        timeout -k 2 30 xvfb-run -a -s "$XA" "$APPDIR"/AppRun.sh glprobe \
+        > /tmp/gl_case.out 2>&1 </dev/null
+    rc=$?
+    pkill -9 Xvfb 2>/dev/null; rm -f /tmp/.X*-lock 2>/dev/null
+    if [ "$rc" -ne 0 ] && grep -q "refusing to forward to ourselves" /tmp/gl_case.out; then
+        verdict E68 1 "self-forward refused by name, and the app got its own failure"
+    else
+        verdict E68 0 "self-forward guard did not fire (rc=$rc)"
+    fi
+
+    # How much of the dispatcher the host can actually stand behind. Reported
+    # rather than asserted: the number is a property of the host's Mesa, and a
+    # threshold here would be a threshold on somebody else's packaging.
+    use_gl_shims gl
+    env ANYLINUX_LIB_FOREIGN_DLOPEN=1 ANYLINUX_LIB_DEBUG=1 APPDIR="$APPDIR" \
+        EGL_PLATFORM=surfaceless timeout -k 2 30 xvfb-run -a -s "$XA" \
+        "$APPDIR"/AppRun.sh glprobe 2>&1 </dev/null |
+      grep -m1 'entry points resolved' | sed 's/^ *\[gl-fwd.so\] >> /         /'
+    pkill -9 Xvfb 2>/dev/null; rm -f /tmp/.X*-lock 2>/dev/null
+
+    use_gl_shims
+fi
 
 echo
 echo "================================================================"

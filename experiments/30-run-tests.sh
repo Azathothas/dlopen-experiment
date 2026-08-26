@@ -365,6 +365,157 @@ UEOF
 fi
 
 echo
+echo "-- K. dlopen scope: what a plugin can see of its loader's closure --"
+#
+# A driver does not always declare everything it uses. Classic Mesa's DRI
+# driver imports _glapi_* with NO DT_NEEDED edge on libglapi.so.0: natively
+# that resolves because libGL.so.1 is in the GLOBAL scope and pulled libglapi
+# in as its own dependency. A loader that dlopens libGL RTLD_LOCAL breaks that
+# without touching either file, and the driver fails with "undefined symbol"
+# for a symbol that is present in the process.
+#
+# Reproduced here in three tiny objects rather than by finding a 2014 Mesa: the
+# mechanism is a property of ld.so, not of Mesa, and stating it in twelve lines
+# is worth more than a distro that has to be excavated. It is the reason
+# src/gl-fwd.c asks for RTLD_GLOBAL -- and the reason it asks only for the ONE
+# object it loads, rather than making every foreign dlopen global.
+cat > prov.c <<'CEOF'
+__attribute__((visibility("default"))) int prov_symbol(void) { return 7; }
+CEOF
+cat > mid.c <<'CEOF'
+extern int prov_symbol(void);
+__attribute__((visibility("default"))) int mid_entry(void) { return prov_symbol(); }
+CEOF
+cat > plug.c <<'CEOF'
+/* imports prov_symbol with no DT_NEEDED edge to whoever defines it */
+extern int prov_symbol(void);
+__attribute__((visibility("default"))) int plug_entry(void) { return prov_symbol() + 1; }
+CEOF
+cat > scope.c <<'CEOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdio.h>
+/* argv[1] = "local" | "global": how the MIDDLE object is loaded. */
+int main(int argc, char **argv) {
+    int global = argc > 1 && argv[1][0] == 'g';
+    void *mid = dlopen("./libmid.so", RTLD_NOW | (global ? RTLD_GLOBAL : RTLD_LOCAL));
+    if (!mid) { printf("FAILED: mid: %s\n", dlerror()); return 1; }
+    void *plug = dlopen("./libplug.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!plug) { printf("FAILED: plugin: %s\n", dlerror()); return 1; }
+    int (*f)(void) = dlsym(plug, "plug_entry");
+    printf("OK: plug_entry()=%d\n", f ? f() : -1);
+    return 0;
+}
+CEOF
+gcc -shared -fPIC -O2 prov.c -o libprov.so -Wl,-soname,libprov.so
+gcc -shared -fPIC -O2 mid.c  -o libmid.so  -Wl,-soname,libmid.so -L"$PWD" -l:libprov.so -Wl,-rpath,"$PWD"
+gcc -shared -fPIC -O2 plug.c -o libplug.so -Wl,-soname,libplug.so
+gcc -O2 scope.c -o scope -ldl
+
+# E54: the loader's closure loaded RTLD_LOCAL. The plugin's undeclared import
+#      cannot see it, and the message names a symbol that IS in the process.
+run E54 FAIL "undefined symbol: prov_symbol" ./scope local
+# E55: the same two files, the middle one RTLD_GLOBAL. Nothing else changed.
+run E55 OK   "plug_entry()=8"                ./scope global
+
+echo
+echo "-- L. preload constructor order --------------------------------"
+#
+# gl-fwd.so's constructor dlopens a HOST library, which needs the bundled libc
+# runtime set that foreign-dlopen.so's constructor puts in the global scope. So
+# the order matters, and the intuitive answer is wrong: ld.so runs preload
+# constructors in REVERSE of the list. Listing gl-fwd.so after foreign-dlopen.so
+# -- which is what a reader would write, and what upstream's packaging note said
+# -- runs it FIRST. Measured, because the alternative is to depend on it.
+cat > ctor.c <<'CEOF'
+#include <stdio.h>
+__attribute__((constructor)) static void c(void) { fputs(NAME "\n", stderr); }
+CEOF
+cat > ctormain.c <<'CEOF'
+int main(void) { return 0; }
+CEOF
+gcc -shared -fPIC -DNAME='"ctor-A"' ctor.c -o ctorA.so
+gcc -shared -fPIC -DNAME='"ctor-B"' ctor.c -o ctorB.so
+gcc -O2 ctormain.c -o ctormain
+# E56: A listed first, B listed second -- B's constructor runs first.
+run E56 OK "ctor-B" env LD_PRELOAD="$PWD/ctorA.so:$PWD/ctorB.so" ./ctormain
+# E57: and it is the ORDER that decides it, not the file: swap them and the
+#      first line swaps too. Without this pair, E56 alone cannot tell "reverse
+#      order" from "B always happens to go first".
+run E57 OK "ctor-A" env LD_PRELOAD="$PWD/ctorB.so:$PWD/ctorA.so" ./ctormain
+
+echo
+echo "-- M. a trampoline forwards any signature ----------------------"
+#
+# src/gl-fwd.c forwards 3470 entry points as two-instruction tail jumps rather
+# than as C wrappers, because a wrapper needs a prototype and a wrong prototype
+# corrupts arguments silently. The claim being tested is that a tail jump is
+# signature-independent: same object, same trampoline, called through six
+# different shapes including a float-heavy one and a varargs one.
+cat > tgt.c <<'CEOF'
+#include <stdarg.h>
+#include <string.h>
+__attribute__((visibility("default")))
+long t_ints(long a, long b, long c, long d, long e, long f, long g, long h) {
+    return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8;
+}
+__attribute__((visibility("default")))
+double t_floats(double a, double b, double c, double d,
+                double e, double f, double g, double h, double i) {
+    return a + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8 + i*9;
+}
+__attribute__((visibility("default")))
+long t_varargs(const char *fmt, ...) {
+    va_list ap; long sum = 0; va_start(ap, fmt);
+    for (const char *p = fmt; *p; p++)
+        sum += (*p == 'd') ? (long)va_arg(ap, double) : va_arg(ap, long);
+    va_end(ap); return sum;
+}
+struct big { long v[6]; };
+__attribute__((visibility("default")))
+struct big t_struct(struct big in) { for (int i = 0; i < 6; i++) in.v[i] *= 2; return in; }
+CEOF
+cat > tramp.c <<'CEOF'
+/* the same trampoline shape src/gl-fwd.c generates, by hand for four names */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdio.h>
+__attribute__((visibility("hidden"))) void *glfwd_tab[4];
+#define STUB(i, n) __asm__(".text\n.globl " #n "\n.type " #n ",@function\n" \
+        #n ":\n\t.byte 0xf3,0x0f,0x1e,0xfa\n\tjmp *glfwd_tab+8*" #i "(%rip)\n")
+STUB(0, t_ints);
+STUB(1, t_floats);
+STUB(2, t_varargs);
+STUB(3, t_struct);
+extern long t_ints(long, long, long, long, long, long, long, long);
+extern double t_floats(double, double, double, double, double, double, double, double, double);
+extern long t_varargs(const char *, ...);
+struct big { long v[6]; };
+extern struct big t_struct(struct big);
+static const char *names[4] = { "t_ints", "t_floats", "t_varargs", "t_struct" };
+int main(void) {
+    void *h = dlopen("./libtgt.so", RTLD_NOW);
+    if (!h) { printf("FAILED: %s\n", dlerror()); return 1; }
+    for (int i = 0; i < 4; i++) glfwd_tab[i] = dlsym(h, names[i]);
+    long i8 = t_ints(1,2,3,4,5,6,7,8);
+    double f9 = t_floats(1,2,3,4,5,6,7,8,9);
+    long va = t_varargs("dldl", 1.5, 2L, 3.5, 4L);
+    struct big in = {{1,2,3,4,5,6}}, out = t_struct(in);
+    int ok = (i8 == 204) && (f9 > 284.99 && f9 < 285.01) && (va == 10) &&
+             (out.v[0] == 2 && out.v[5] == 12);
+    printf("%s: ints=%ld floats=%.2f varargs=%ld struct=[%ld..%ld]\n",
+           ok ? "OK" : "FAILED", i8, f9, va, out.v[0], out.v[5]);
+    return ok ? 0 : 1;
+}
+CEOF
+gcc -shared -fPIC -O2 tgt.c -o libtgt.so -Wl,-soname,libtgt.so
+gcc -O2 -fcf-protection=full tramp.c -o tramp -ldl
+# E58: eight integer registers, nine float registers, a varargs call whose %al
+#      carries the float count, and a struct returned through hidden memory --
+#      all through a jump that knows none of their shapes.
+run E58 OK "OK: ints=204" ./tramp
+
+echo
 echo "================================================================"
 echo " predictions matched: $PASS   mismatched: $FAIL"
 echo "================================================================"
