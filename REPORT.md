@@ -1199,8 +1199,8 @@ measuring BOTH host classes instead of declining to look at one of them. Section
 | T2.7 | cache-only library found via `--library-path` | **PASS** (E13c) |
 | T3.1 | Alpine baseline fails before the fix | **PASS with a caveat**, below |
 | T3.2 | `vkcube` with the host driver | **PASS.** `Selected GPU 0: llvmpipe (LLVM 20.1.8)` on Alpine, feature on; `reported zero accessible devices` as shipped. Section 6.2 |
-| T3.3 | `glxgears` | **PASS on both host classes.** On a glvnd host it always worked and still does (E61, E62). On Alpine's classic Mesa it failed with `couldn't get an RGB, Double-buffered visual` and now renders (E61, E62), through `gl-fwd.so`. Section 9 |
-| T3.4 | GL past the `glxgears` symbol set, with the frame read back | **PASS.** `glprobe` returns `64 128 191 255` from the pixel it cleared, on both host classes (E63, E64) |
+| T3.3 | `glxgears` | **PASS on all three host classes** (9.11 added pre-glvnd glibc). On a glvnd host it always worked and still does (E61, E62). On Alpine's classic Mesa it failed with `couldn't get an RGB, Double-buffered visual` and now renders (E61, E62), through `gl-fwd.so`. Section 9 |
+| T3.4 | GL past the `glxgears` symbol set, with the frame read back | **PASS.** `glprobe` returns `64 128 191 255` from the pixel it cleared, on all three host classes (E63, E64, and 9.11) |
 | T3.5 | EGL on a host with no glvnd EGL vendor | **PASS.** `eglprobe` goes from `EGL_NO_DISPLAY` to a working surfaceless context (E65, E66) |
 | T3.6 | every bundled loader classified | **PASS.** 8 objects import `dlopen`, 0 unclassified (E59) |
 | T3.4 | driver provenance is the host's | **PASS**, below |
@@ -1295,7 +1295,7 @@ T1.7  PASS, with two live hazards named. The divergences are real --
       a loader shim. E50 fails if the count of live hazards ever changes.
       Section 7.4.
 
-T3.3  PASSES on both host classes, and this entry used to say the opposite.
+T3.3  PASSES on all three host classes, and this entry used to say the opposite.
       Alpine's mesa-gl is classic Mesa, so no libGLX_<vendor>.so.0 exists for
       the AppImage's bundled libglvnd to dlopen -- that part was measured and
       is still true. The conclusion drawn from it, that no loader shim could
@@ -1460,7 +1460,8 @@ it returns zero, the frame comes out black, and no amount of grepping for
 So the list is generated. [`tools/gen_gl_fwd.py`](tools/gen_gl_fwd.py) reads the
 export table out of the bundled `libGL.so.1` itself; `make gl-syms-check` fails
 the build if the checked-in table and the bundled library disagree, and E60 runs
-that check against the real extracted AppDir on both hosts. A newer bundled
+that check against the real extracted AppDir on every host with python 3.6+.
+A newer bundled
 libglvnd cannot add an entry point silently.
 
 ### 9.4 Trampolines, not wrappers -- and the slot that can run code
@@ -1637,11 +1638,17 @@ an idempotent `foreign_dlopen_init_now()` and `gl-fwd` calls it before its first
 `dlopen`. The `.preload` order is then free, and the reason it is free is
 written down instead of discovered again.
 
-### 9.7 End to end, on both host classes
+### 9.7 End to end, on two host classes -- and see 9.11 for the third
 
 The point of measuring both is that they fail in opposite directions. On a
 classic-Mesa host the shim is the only thing that makes GL work; on a glvnd host
 GL already worked and the shim's job is to change nothing.
+
+⭐ Two was the whole story when this section was written and it is not now:
+9.11 adds the pre-glvnd GLIBC hosts, which are classic like Alpine and glibc
+like Debian, and 9.12 adds an AppImage of the other SHAPE. Read those two after
+this one; the tables below are still exactly what they say, on the two hosts
+they name.
 
 **alpine:3.22, musl, classic Mesa 25.1, no glvnd vendor library:**
 
@@ -1734,8 +1741,9 @@ of use.
 
 ### 9.9 What it costs a process that never calls GL
 
-Nothing. That is a change: this section used to record 30 ms and 30 MB, and the
-gate that would have avoided them as deliberately not written.
+Nothing beyond mapping the shim itself. That is a change: this section used to
+record 30 ms and 30 MB of HOST MESA, and the gate that would have avoided them
+as deliberately not written.
 
 The shims are preloaded for every binary in an AppDir, so a Vulkan-only run
 used to load the whole host GL stack and never touch it. The reason it was not

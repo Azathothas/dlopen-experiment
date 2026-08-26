@@ -905,14 +905,32 @@ else
         }
         # E78/E79 are the controls, and they are scored: a control nobody
         # checks is a control that can quietly stop running.
+        # ⛔ What E78 and E79 assert is that the control RAN, not that it
+        # passed. Either answer is a legitimate property of a host -- 16.04's
+        # native EGL fails -- but "it printed no verdict at all" is neither,
+        # and it is the dangerous one: a native probe that cannot reach a
+        # display relaxes E64's prediction to FAIL, and a completely broken
+        # shim then scores MATCH for failing too. A control that is allowed to
+        # be absent is a control that silently stops controlling.
         nout=$(native_run /tmp/native-glprobe); nrc=$?
-        [ $nrc -eq 0 ] && { NGL_WANT=OK;  NGL_NEEDLE="OK: GL is complete"; } ||
-                          { NGL_WANT=FAIL; NGL_NEEDLE="FAILED"; }
-        verdict E78 1 "native glprobe (no AppImage at all): $(printf '%s' "$nout" | cut -c1-64)"
+        # The verdict line and the exit status must AGREE. A probe that says
+        # OK and exits non-zero has not finished, which is the shape section 5
+        # records for GL_RENDERER, and neither half of it should be believed.
+        case "$nout,$nrc" in
+            OK:*,0)      NGL_WANT=OK;   NGL_NEEDLE="OK: GL is complete"; n78=1 ;;
+            FAILED*,0)   n78=0 ;;
+            FAILED*)     NGL_WANT=FAIL; NGL_NEEDLE="FAILED";             n78=1 ;;
+            *)           n78=0 ;;   # keeps the host-class default, and MISMATCHes
+        esac
+        verdict E78 "$n78" "native glprobe (no AppImage at all), rc=$nrc: $(printf '%s' "$nout" | cut -c1-60)"
         nout=$(native_run /tmp/native-eglprobe); nrc=$?
-        [ $nrc -eq 0 ] && { NEGL_WANT=OK;  NEGL_NEEDLE="OK: EGL is complete"; } ||
-                          { NEGL_WANT=FAIL; NEGL_NEEDLE="FAILED"; }
-        verdict E79 1 "native eglprobe (no AppImage at all): $(printf '%s' "$nout" | cut -c1-64)"
+        case "$nout,$nrc" in
+            OK:*,0)      NEGL_WANT=OK;   NEGL_NEEDLE="OK: EGL is complete"; n79=1 ;;
+            FAILED*,0)   n79=0 ;;
+            FAILED*)     NEGL_WANT=FAIL; NEGL_NEEDLE="FAILED";              n79=1 ;;
+            *)           n79=0 ;;
+        esac
+        verdict E79 "$n79" "native eglprobe (no AppImage at all), rc=$nrc: $(printf '%s' "$nout" | cut -c1-60)"
         echo "         E64 and E66 are therefore predicted GL=$NGL_WANT EGL=$NEGL_WANT on this host"
     else
         skip E78 "no gcc or no GL/EGL headers on this host: the native control cannot be built, so E64 and E66 fall back to predicting the host CLASS rather than this host"

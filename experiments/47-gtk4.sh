@@ -125,11 +125,17 @@ done
 #      for: before it, "3470 forwarded entry points" had been exercised by
 #      glxgears (33 linked) and a probe written here (15 called).
 #
-#      Reported, never thresholded -- except for one bound that IS a claim:
-#      GTK4 renders through GLES, so if the GLES count is zero the shim is not
-#      in the path at all and E80 passed for the wrong reason.
+#      Reported, never thresholded -- except for one bound that IS a claim.
+#      E80 passes on rc=143, which means "still running when the timeout ended"
+#      and cannot by itself tell a window that rendered from a process that
+#      started and hung. GTK4 renders through GLES, so the GLES count is what
+#      distinguishes them. The bound is 10 rather than 1 for the same reason:
+#      one call is what a process that got as far as probing and stopped would
+#      produce. Measured here: 46. Deliberately far below that and far above
+#      one, because a threshold set near the measurement is a threshold that
+#      fails when somebody's GTK renders one frame fewer.
 ngl=$(called gl-fwd.so); negl=$(called egl-fwd.so); ngles=$(called gles-fwd.so)
-[ "$ngles" -gt 0 ] && r=1 || r=0
+[ "$ngles" -ge 10 ] && r=1 || r=0
 verdict E83 "$r" "gtk4-demo called $ngl GL, $negl EGL and $ngles GLES entry points -- GTK4's renderer is GLES, which is why a GLES shim is not optional"
 
 cp "$A/.preload.shipped" "$A/.preload"

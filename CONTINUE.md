@@ -925,6 +925,27 @@ terms of the outcome and must list what it did not examine.** "The experiment is
 closed" was true of *can a bundled glibc drive a foreign-libc driver* and false
 of *does the AppImage work on this host*. Section 4 is written that way now.
 
+⭐ **Two more from the session that closed 4.0, both the same shape.**
+
+- **A synthetic case cannot find what nobody thought of; a real one does not
+  have to.** Four purpose-built cases, two host classes and 3470 generated
+  trampolines never noticed that `gl-fwd` asked only whether the HOST had a
+  vendor library. A real GTK4 application found it on its first run, because a
+  self-contained AppImage is a SHAPE nothing here had ever been pointed at
+  (B6). The enumeration habit above -- "a bundled object that imports `dlopen`
+  is a loader by construction" -- has a partner: **enumerate the shapes of
+  input, not only the classes of host.** The AppDir this repository tests
+  against bundles a dispatcher and no Mesa. Most AppImages are the other kind.
+- **A control that cannot fail is not a control.** E78 and E79 run the probes
+  natively so E64 and E66 can be predicted against the host rather than against
+  a constant, and as first written they scored `verdict <id> 1` -- MATCH,
+  unconditionally. That is worse than not scoring them: if the native probe
+  fails to *run*, the prediction it feeds relaxes to FAIL, and a completely
+  broken shim then scores MATCH for failing too. They now assert that the
+  control produced a verdict line AND that its exit status agrees with it.
+  ⛔ Before adding a case that computes its own verdict, ask what input would
+  make it print MISMATCH. If there is none, it is a `printf`.
+
 ### About symbol versions
 
 - **An unversioned reference does NOT get the default definition.** This is the

@@ -825,7 +825,32 @@ void *glfwd_resolve_one(int index) {
 		return absent;
 
 	void *p = glfwd_addr ? glfwd_addr[index] : NULL;
-	if (p) {
+	int forwarded = p != NULL;
+	if (!p)
+		p = absent;
+
+	/*
+	 * COUNT AND REPORT ONLY IF WE ARE THE ONE THAT PATCHED THE SLOT.
+	 *
+	 * Two threads can reach this for the SAME index before either has written
+	 * the table -- an ordinary shape in a threaded renderer -- and both would
+	 * then count the call and print the line. The counters are labelled "N of
+	 * M entry points were CALLED", which is a count of distinct NAMES, so a
+	 * double count is not a rounding error, it is the number meaning something
+	 * other than what it says. B6's whole value is that this number is
+	 * measured rather than estimated, and a measurement that can exceed its
+	 * own denominator is worth less than the estimate it replaced.
+	 *
+	 * The compare-exchange makes the transition itself the thing that is
+	 * counted: exactly one thread moves the slot off the resolver, and both
+	 * return the same address either way.
+	 */
+	void *expect = (void *)(uintptr_t)glfwd_resolve_asm;
+	if (!__atomic_compare_exchange_n(&glfwd_tab[index], &expect, p, 0,
+	                                 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return p;
+
+	if (forwarded) {
 		__atomic_fetch_add(&glfwd_called_fwd, 1, __ATOMIC_RELAXED);
 		/* One line per entry point the first time it is called. Separate from
 		 * ANYLINUX_LIB_DEBUG because it is a different question -- not "what
@@ -850,9 +875,7 @@ void *glfwd_resolve_one(int index) {
 			glfwd_log("ABSENT entry point called: %s -- this host's %s has no "
 			          "implementation; returning zero\n",
 			          glfwd_names[index], GLFWD_SONAME);
-		p = absent;
 	}
-	__atomic_store_n(&glfwd_tab[index], p, __ATOMIC_RELEASE);
 	return p;
 }
 

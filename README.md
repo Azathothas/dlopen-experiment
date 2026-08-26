@@ -423,16 +423,19 @@ tests/cudaprobe.c                  a closed-source vendor driver, and a GPU roun
 tests/bindprobe.c                  which DEFINITION each loaded object actually bound
 tests/glprobe.c                    GL past the glxgears symbol set, with the frame
                                    read back so a stub cannot pass for a driver
-tests/eglprobe.c                   the same question asked of EGL, with no X at all
+tests/eglprobe.c                   the same question asked of EGL, surfaceless
 tests/abi-abi.h                    the view both sides of the ABI boundary fill
 tests/abi-guest.c                  the host driver's side; built by glibc and by musl
 tests/abi-host.c                   the crossings: allocator, errno, FILE*, mutex, structs
 
 experiments/run.ps1                one command, the whole evidence table
 experiments/1x-3x.sh               the three container stages behind run.ps1
-experiments/appimage.ps1           the end-to-end proof on a real AppImage
+experiments/appimage.ps1           the end-to-end proof on real AppImages
 experiments/4x-*.sh                its stages: extract, build on the floor, the musl
-                                   ABI guest, and the two hosts
+                                   ABI guest, four hosts (musl, glvnd glibc and
+                                   two pre-glvnd glibc), and a fifth stage that
+                                   is a different APPIMAGE rather than a host --
+                                   47-gtk4.sh, a real GTK4 application
 scripts/wsl-ephemeral.ps1          throwaway WSL2 distros from any OCI image
 elfsym.py, gap.py                  dependency-free ELF reader and gap driver
 ```
