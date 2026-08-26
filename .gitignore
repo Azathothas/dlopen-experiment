@@ -4,6 +4,7 @@ __pycache__/
 src/foreign-dlopen.so
 src/gl-fwd.so
 src/egl-fwd.so
+src/gles-fwd.so
 src/runtime-select
 # ephemeral scratch
 .tmp/
