@@ -72,7 +72,7 @@ not a symbol problem at all and is not fixable by any amount of bridging;
 | An entry point the host does not implement | **a line naming it at the first call**, not a silent zero; `glprobe` reaches **zero** of Alpine's 1097 | E72, E73, [REPORT.md 9.8](REPORT.md) |
 | The aarch64 trampolines | **run**, under qemu-user -- not only assembled | E76, `make gl-fwd-qemu-check` |
 | **EGL on the same host** | `EGL_NO_DISPLAY` -> a working surfaceless context | E65, E66, [`tests/eglprobe.c`](tests/eglprobe.c) |
-| Every bundled loader classified rather than assumed | **8 objects import `dlopen`, 0 unclassified** | E59, [`tools/plugin_boundaries.py`](tools/plugin_boundaries.py) |
+| Every bundled loader classified rather than assumed | **8 objects import `dlopen`, 0 unclassified** in the demo AppDir; the gtk4 one has **9 UNCLASSIFIED**, named and not yet looked at | E59, [`tools/plugin_boundaries.py`](tools/plugin_boundaries.py) |
 | The host GL stack in a process that never draws | **not loaded at all** -- nothing resolves until something calls | E71, E74, [REPORT.md 9.9](REPORT.md) |
 | A **closed-source** host driver, on real silicon | **4096 bytes round-tripped through an RTX 3050 Ti and verified**, from the AppImage's bundled glibc on Alpine | E41, [`tests/cudaprobe.c`](tests/cudaprobe.c), [REPORT.md 7.1](REPORT.md) |
 | Rendering on an actual GPU | **`GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Ti Laptop GPU)`, 101-121 FPS**, through the AppImage with no file changed | E53, [REPORT.md 7.5](REPORT.md) |

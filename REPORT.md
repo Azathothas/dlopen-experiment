@@ -1817,6 +1817,24 @@ decoration plugins linked in, so its only `dlopen` is a lazy one for the bundled
 `libwayland-client.so.0` -- but "benign, checked" and "never looked at" are
 different states and only one of them was true before.
 
+⭐ **And the argument for the tool got its strongest instance after this
+section was written.** The gtk4 AppDir from 9.12 is 272 libraries rather than
+91, and thirty seconds of the same command says:
+
+```
+covered 2   n/a 1   unmeasured 3   UNCLASSIFIED 9
+```
+
+Two of the three `unmeasured` are `libgbm.so.1` and `libva.so.2` -- boundaries
+this report names below as having no AppImage here to measure them on. There is
+one now. And one of the nine UNCLASSIFIED is **`libepoxy.so.0`**, which is
+itself a GL entry-point loader: it `dlopen`s `libGL`, `libEGL` and `libGLESv2`
+by soname and resolves through them. That is the same DISPATCHER shape as
+libglvnd, in the path of the application section 9.12 uses, and it is very
+likely why gtk4-demo's counts come out 1 GL and 46 GLES. Nobody has looked at
+it. It is recorded in CONTINUE 4.2 rather than investigated here, and it is
+recorded because the tool found it rather than because anyone wondered.
+
 The third verdict, **`unmeasured`**, exists for the same reason and is
 deliberately not folded into either of the others. `libX11.so.6` can load i18n
 modules from `/usr/lib/X11/locale` when it is built with them; nothing here has
