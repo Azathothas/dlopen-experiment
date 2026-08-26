@@ -358,18 +358,21 @@ known colour and reads `64 128 191 255` back out of the framebuffer (E64), and
 are unchanged, so the shim is transparent where GL already worked. That is a
 real result and it is not in doubt.
 
-**What is not demonstrated, in priority order:**
+**What is not demonstrated, in priority order.** ⭐ The titles below are how
+each item has been referred to, so they do not change; what an item's row says
+after it closes is written under the table in 4.0.1, including where a premise
+in the row turned out to be wrong.
 
-| # | the "but" | why it matters | how to close it |
-|---|---|---|---|
-| **B1** | **1097 of 3470 entry points return zero and say nothing.** They forward to `glfwd_absent`. An application that links one gets a silent no-op, not a diagnostic | This is the difference between "works" and "works for the applications tried". A silent zero is the failure mode this repository spends the most words warning about, and the shim now has one by construction | Make the absent case observable without making it fatal: a one-line-per-name report at first call under `ANYLINUX_LIB_DEBUG=1`, which needs the register-saving resolver stub described in B2. Then measure which of the 1097 a real application actually touches -- likely zero, and "likely" is the problem |
-| **B2** | **The trampolines cannot report, because a table slot cannot run code.** The current design fills the table in a constructor and every slot is either a real address or a silent stub | It also forces the eager load in B4 and blocks per-symbol laziness | Write the x86-64 register-saving resolver: save `rdi rsi rdx rcx r8 r9 xmm0-7 rax`, call a C resolver with the index, restore, tail-jump. This is `_dl_runtime_resolve` minus the bookkeeping, ~60 lines, and it is the single change that unlocks B1 and B4 |
-| **B3** | **Only ONE non-glvnd host family has been tested: musl Alpine.** The other half of the claim -- pre-glvnd **glibc** distros, Ubuntu 14.04/16.04, Debian 8 -- is asserted, not measured, here | The README and REPORT 9 both say "every musl distro, and every pre-glvnd glibc distro". Half of that sentence has evidence | `ubuntu:14.04` and `ubuntu:16.04` still exist on Docker Hub; their apt repositories moved to `old-releases.ubuntu.com`, which is a `sources.list` rewrite, not a blocker. Add them as a third and fourth host to `appimage.ps1` and run E59-E68 there. Mesa 10.1 is also the one stack where the `_glapi_tls_Dispatch` case in REPORT 9.5 might reproduce, which would close a second open question at the same time |
-| **B4** | **The shims load the host GL stack in every process, GL or not.** Measured cost: +30 ms and +30 MB on a Vulkan-only run | Small, but it is 30 MB of host Mesa mapped into a process that will never call it, and the reason it is not gated is that the gate was judged too dangerous to write. With B2 done it becomes trivial: nothing resolves until something calls | Gate on first call, via B2's resolver. Delete the constructor's `dlopen` entirely |
-| **B5** | **No GLES shim.** `libGLESv2.so.2` and `libGLESv1_CM.so.1` are the same shape and are not covered | An AppImage bundling Mesa's GLES has the identical gap and would fail identically. The generator and the shim already do everything needed; this is a table and two `-D` flags | `make gl-syms` against a bundled `libGLESv2.so.2`, add the build rule, add an E-case. Note the demo AppDir bundles neither, so this needs an AppDir that does -- see B6 |
-| **B6** | **Two applications, one of which I wrote.** `glxgears` (33 GL symbols) and `glprobe` (15). Nothing real | 3470 forwarded entry points have been exercised at a rate of about 1%. The claim "it replaces libGL" rests on the export count, not on use | Build a demo AppDir around something with a real GL surface. `pkgforge-dev/Anylinux-AppImages` `useful-tools/demo/` has recipes for gtk3/gtk4/qt6/sdl/webkit2gtk AppImages; any of those on Alpine is a far harder test than `glxgears` |
-| **B7** | **Never on real silicon on the non-glvnd path.** Every GL result on Alpine is llvmpipe under Xvfb | The d3d12 path (E53) proves hardware GL works through the AppImage on a **glvnd** host. The classic-Mesa path has no hardware result at all | Alpine has no `d3d12_dri.so` (E53a's skip reason). Either build Mesa's d3d12 Gallium driver for Alpine, or accept this as hardware-blocked and say so in one sentence instead of leaving it implied |
-| **B8** | **aarch64 trampolines assemble and have never run.** `make gl-fwd-asm-check` produces correct instructions and relocations and proves nothing else | The repository already carries this caveat for `RS_LDSO` and `RS_TRIPLET`; `gl-fwd` adds hand-written assembly to it, which is a larger thing to be unverified | Hardware, or a qemu-user run under `--platform linux/arm64`. The second is cheap and worth trying before declaring it blocked |
+| # | status | the "but" | why it matters | how to close it |
+|---|---|---|---|---|
+| **B1** | ✅ CLOSED | **1097 of 3470 entry points return zero and say nothing.** They forward to `glfwd_absent`. An application that links one gets a silent no-op, not a diagnostic | This is the difference between "works" and "works for the applications tried". A silent zero is the failure mode this repository spends the most words warning about, and the shim now has one by construction | Make the absent case observable without making it fatal: a one-line-per-name report at first call under `ANYLINUX_LIB_DEBUG=1`, which needs the register-saving resolver stub described in B2. Then measure which of the 1097 a real application actually touches -- likely zero, and "likely" is the problem |
+| **B2** | ✅ CLOSED | **The trampolines cannot report, because a table slot cannot run code.** The current design fills the table in a constructor and every slot is either a real address or a silent stub | It also forces the eager load in B4 and blocks per-symbol laziness | Write the x86-64 register-saving resolver: save `rdi rsi rdx rcx r8 r9 xmm0-7 rax`, call a C resolver with the index, restore, tail-jump. This is `_dl_runtime_resolve` minus the bookkeeping, ~60 lines, and it is the single change that unlocks B1 and B4 |
+| **B3** | ⬜ open | **Only ONE non-glvnd host family has been tested: musl Alpine.** The other half of the claim -- pre-glvnd **glibc** distros, Ubuntu 14.04/16.04, Debian 8 -- is asserted, not measured, here | The README and REPORT 9 both say "every musl distro, and every pre-glvnd glibc distro". Half of that sentence has evidence | `ubuntu:14.04` and `ubuntu:16.04` still exist on Docker Hub; their apt repositories moved to `old-releases.ubuntu.com`, which is a `sources.list` rewrite, not a blocker. Add them as a third and fourth host to `appimage.ps1` and run E59-E68 there. Mesa 10.1 is also the one stack where the `_glapi_tls_Dispatch` case in REPORT 9.5 might reproduce, which would close a second open question at the same time |
+| **B4** | ✅ CLOSED | **The shims load the host GL stack in every process, GL or not.** Measured cost: +30 ms and +30 MB on a Vulkan-only run | Small, but it is 30 MB of host Mesa mapped into a process that will never call it, and the reason it is not gated is that the gate was judged too dangerous to write. With B2 done it becomes trivial: nothing resolves until something calls | Gate on first call, via B2's resolver. Delete the constructor's `dlopen` entirely |
+| **B5** | ⬜ open | **No GLES shim.** `libGLESv2.so.2` and `libGLESv1_CM.so.1` are the same shape and are not covered | An AppImage bundling Mesa's GLES has the identical gap and would fail identically. The generator and the shim already do everything needed; this is a table and two `-D` flags | `make gl-syms` against a bundled `libGLESv2.so.2`, add the build rule, add an E-case. Note the demo AppDir bundles neither, so this needs an AppDir that does -- see B6 |
+| **B6** | ⬜ open | **Two applications, one of which I wrote.** `glxgears` (33 GL symbols) and `glprobe` (15). Nothing real | 3470 forwarded entry points have been exercised at a rate of about 1%. The claim "it replaces libGL" rests on the export count, not on use | Build a demo AppDir around something with a real GL surface. `pkgforge-dev/Anylinux-AppImages` `useful-tools/demo/` has recipes for gtk3/gtk4/qt6/sdl/webkit2gtk AppImages; any of those on Alpine is a far harder test than `glxgears` |
+| **B7** | ⬜ open | **Never on real silicon on the non-glvnd path.** Every GL result on Alpine is llvmpipe under Xvfb | The d3d12 path (E53) proves hardware GL works through the AppImage on a **glvnd** host. The classic-Mesa path has no hardware result at all | Alpine has no `d3d12_dri.so` (E53a's skip reason). Either build Mesa's d3d12 Gallium driver for Alpine, or accept this as hardware-blocked and say so in one sentence instead of leaving it implied |
+| **B8** | ⬜ open | **aarch64 trampolines assemble and have never run.** `make gl-fwd-asm-check` produces correct instructions and relocations and proves nothing else | The repository already carries this caveat for `RS_LDSO` and `RS_TRIPLET`; `gl-fwd` adds hand-written assembly to it, which is a larger thing to be unverified | Hardware, or a qemu-user run under `--platform linux/arm64`. The second is cheap and worth trying before declaring it blocked |
 
 ⭐ **B2 is the keystone.** B1 and B4 both reduce to it, and it is the one piece
 of genuinely new machinery. B3 is the highest-value item that needs no new
@@ -379,6 +382,100 @@ machinery at all.
 [`PORTING.md`](PORTING.md) is written and waiting, and it is deliberately a
 separate session with a separate agent. Porting a claim that is wider than its
 evidence just publishes the gap.
+
+### 4.0.1 Closure records
+
+One entry per item that has closed, with the command that proves it and the
+output it produced. ⛔ Where a premise in the row above turned out to be wrong,
+the correction is here and the row keeps its wording, because the row is how
+the item has been referred to everywhere else.
+
+#### B2 ✅ -- the resolver exists, and it is measured
+
+`src/gl-fwd.c`. Every slot now starts at `glfwd_resolve_asm` instead of at an
+address, and each trampoline carries its own index in a register the ABI
+already lets a call destroy -- `%r11` on x86-64, `x17`/IP1 on aarch64:
+
+```asm
+glClearColor:
+	endbr64
+	mov    $0xc1, %r11d            # 193, and glfwd_tab+0x608 is 8*193
+	jmp    *0x296b8(%rip)
+```
+
+The resolver saves `rax rdi rsi rdx rcx r8 r9 r10 xmm0-7`, calls
+`glfwd_resolve_one(index)`, restores and tail-jumps. `and $-16,%rsp` makes the
+alignment unconditional rather than argued, because a trampoline is reached
+from anywhere and the `movaps` faults on a misaligned address.
+
+Measured by **E69-E73** in `experiments/run.ps1`, section N, against the real
+`src/gl-fwd.c` built with a five-name table -- not a copy of the resolver that
+could drift from it:
+
+```
+E69  OK: first-call ints=204 floats=285.00 varargs=10 struct=[2..12]
+         second-call-identical=yes absent-returned=0
+```
+
+Eight integer registers, nine float registers, a varargs `%al` count and a
+struct returned through hidden memory, all surviving a C call made in the
+middle of the forward -- and the second call agreeing with the first, which is
+what says the slot was patched with the right address rather than that the
+resolver got lucky once.
+
+#### B4 ✅ -- nothing loads until something calls
+
+The constructor's `dlopen` is gone; `glfwd_ensure_target()` runs at the first
+call through any slot. `ANYLINUX_GL_FWD_EAGER=1` restores the old behaviour,
+so the cost of not doing it stays a measurement rather than a memory.
+
+Asked of `/proc/self/maps`, because "it started faster" is not evidence about
+what was loaded, and asked on **both** sides -- E71 alone would also pass if
+the shim were simply broken:
+
+```
+E71   OK: shim mapped=1 target mapped=0 (called=-1)     no call
+E71b  OK: shim mapped=1 target mapped=1 (called=204)    one call
+```
+
+and at AppImage scale, on both host classes, in `appimage.ps1`:
+
+```
+E74   Vulkan-only run: 2 shim(s) loaded, 0 resolved, no host GL mapped
+E74b  the same shims, after a GL call: 2373 of 3470 entry points resolved
+```
+
+⚠ **The row's "+30 ms and +30 MB" is now the cost of `ANYLINUX_GL_FWD_EAGER=1`
+and not of the default.** REPORT.md 9.9 is rewritten to say which.
+
+#### B1 ✅ -- and the answer to the question the row could not ask
+
+The absent case is now a line at the first call of that name, under
+`ANYLINUX_LIB_DEBUG=1`, and not fatal -- returning zero is what the application
+would get natively on a host where the name is equally absent:
+
+```
+E72   [gl-fwd.so] >> ABSENT entry point called: t_absent -- this host's
+                     libtgt.so has no implementation; returning zero
+```
+
+The row asked for something the old design could not measure at all: *which of
+the 1097 does a real application actually touch -- likely zero, and "likely" is
+the problem.* On alpine:3.22, `glprobe` through the full AppDir:
+
+```
+libGL.so.1: 2373 of 3470 entry points resolved from the host library
+            (1357 exported, 1016 via glXGetProcAddressARB, 1097 absent)
+libGL.so.1: 15 of 3470 entry points were CALLED (15 forwarded, 0 absent)
+            out of 2373 this host could resolve
+absent entry points this application reached: 0
+```
+
+**Zero, measured.** ⭐ And the second line is the number B6 has been guessing
+at: `glprobe` touches **15 of 3470**, which is 0.4%, not the "about 1%" B6's
+row estimates. That number is reported and never thresholded -- it is a
+property of the application, and a bar here would be a bar on somebody else's
+program.
 
 ### 4.1 The blocker, now fixed
 

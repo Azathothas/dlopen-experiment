@@ -516,6 +516,136 @@ gcc -O2 -fcf-protection=full tramp.c -o tramp -ldl
 run E58 OK "OK: ints=204" ./tramp
 
 echo
+echo "-- N. the resolver: a table slot that can run code -------------"
+#
+# E58 measures a trampoline whose slot already holds an address. That design
+# could not do anything AT the first call, which cost two things: the host
+# stack had to be loaded in every process whether or not it would be used, and
+# an entry point the host does not implement was a silent zero.
+#
+# src/gl-fwd.c now starts every slot at a register-saving resolver and the
+# trampoline carries its own index. These cases measure that resolver -- the
+# real one, built from src/gl-fwd.c with a four-name table, not a copy of it
+# that could drift. libtgt.so from section M is the "host library".
+cat > tgt-fwd.h <<'CEOF'
+#ifndef GLFWD_SONAME
+#define GLFWD_SONAME  "libtgt.so"
+#define GLFWD_COUNT   5
+#endif
+GLFWD_SYM(0, t_ints)
+GLFWD_SYM(1, t_floats)
+GLFWD_SYM(2, t_varargs)
+GLFWD_SYM(3, t_struct)
+GLFWD_SYM(4, t_absent)
+CEOF
+# t_absent is in the table and NOT in libtgt.so, which is the 1097-entry-point
+# case in miniature: a name the shim must export and the host cannot provide.
+cp /repo/src/gl-fwd.c .
+gcc -shared -fPIC -O2 -Wall -Wextra -Wno-format-truncation -fcf-protection=full \
+    -DGLFWD_TABLE='"tgt-fwd.h"' -DGLFWD_TAG='"tgt-fwd.so"' \
+    -DGLFWD_GETPROC='"t_getproc"' \
+    -Wl,-soname,libtgt.so gl-fwd.c -o tgt-fwd.so -ldl 2>/dev/null
+
+cat > tramp2.c <<'CEOF'
+/* Calls each entry point TWICE. The first call goes through the resolver with
+   every argument still in its register; the second goes through the patched
+   slot. If the resolver drops or reorders anything, the two disagree -- and a
+   test that called once could not tell the difference. */
+#include <stdio.h>
+struct big { long v[6]; };
+extern long   t_ints(long, long, long, long, long, long, long, long);
+extern double t_floats(double, double, double, double, double, double, double, double, double);
+extern long   t_varargs(const char *, ...);
+extern struct big t_struct(struct big);
+extern long   t_absent(long, long);
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    long   i1 = t_ints(1,2,3,4,5,6,7,8),   i2 = t_ints(1,2,3,4,5,6,7,8);
+    double f1 = t_floats(1,2,3,4,5,6,7,8,9), f2 = t_floats(1,2,3,4,5,6,7,8,9);
+    long   v1 = t_varargs("dldl", 1.5, 2L, 3.5, 4L),
+           v2 = t_varargs("dldl", 1.5, 2L, 3.5, 4L);
+    struct big in = {{1,2,3,4,5,6}}, s1 = t_struct(in), s2 = t_struct(in);
+    long   a1 = t_absent(7, 9);
+    int first = (i1 == 204) && (f1 > 284.99 && f1 < 285.01) && (v1 == 10) &&
+                (s1.v[0] == 2 && s1.v[5] == 12);
+    int same  = (i1 == i2) && (f1 == f2) && (v1 == v2) &&
+                (s1.v[0] == s2.v[0] && s1.v[5] == s2.v[5]);
+    printf("%s: first-call ints=%ld floats=%.2f varargs=%ld struct=[%ld..%ld]"
+           " second-call-identical=%s absent-returned=%ld\n",
+           (first && same && a1 == 0) ? "OK" : "FAILED",
+           i1, f1, v1, s1.v[0], s1.v[5], same ? "yes" : "no", a1);
+    return (first && same && a1 == 0) ? 0 : 1;
+}
+CEOF
+cat > mapped.c <<'CEOF'
+/* Links the shim's soname. With no argument it calls NOTHING; with one it
+   makes a single call. Then it asks the KERNEL what is mapped, because "it
+   started faster" is not evidence about what was loaded. */
+#include <stdio.h>
+#include <string.h>
+extern long t_ints(long, long, long, long, long, long, long, long);
+int main(int argc, char **argv) {
+    long called = (argc > 1) ? t_ints(1,2,3,4,5,6,7,8) : -1;
+    FILE *f = fopen("/proc/self/maps", "r");
+    char line[4096]; int host = 0, shim = 0;
+    while (f && fgets(line, sizeof line, f)) {
+        if (strstr(line, "/libtgt.so"))  host = 1;
+        if (strstr(line, "/tgt-fwd.so")) shim = 1;
+    }
+    if (f) fclose(f);
+    int want_host = (argc > 1);
+    int ok = shim && (host == want_host);
+    printf("%s: shim mapped=%d target mapped=%d (called=%ld)\n",
+           ok ? "OK" : "FAILED", shim, host, called);
+    return ok ? 0 : 1;
+}
+CEOF
+# Linked against the SHIM, not against libtgt.so: the shim carries libtgt.so's
+# SONAME, so DT_NEEDED reads libtgt.so and ld.so binds it to whichever object
+# claims that name -- which is the whole mechanism, reproduced in miniature.
+# t_absent exists only in the shim, so this is also the only thing that links.
+# --no-as-needed because mapped.c with no argument references nothing, and the
+# default would drop the DT_NEEDED that the case is about.
+gcc -O2 -fcf-protection=full tramp2.c -o tramp2 ./tgt-fwd.so -Wl,-rpath,"$PWD"
+gcc -O2 -fcf-protection=full mapped.c -o mapped ./tgt-fwd.so -Wl,--no-as-needed \
+    -Wl,-rpath,"$PWD"
+
+# The shim owns libtgt.so's soname, so the ONE name it is allowed to resolve
+# cannot come from ld.so -- ld.so would hand back the shim. ANYLINUX_GL_HOST_DIR
+# is the handoff that names the directory to look in.
+fwd() { env LD_PRELOAD="$PWD/tgt-fwd.so" ANYLINUX_GL_HOST_DIR="$PWD" "$@"; }
+
+# E69: eight integer registers, nine float registers, a varargs %al count and a
+#      struct returned through hidden memory -- all surviving a C call made in
+#      the MIDDLE of the forward. And the second call agrees with the first,
+#      which is what says the slot was patched with the right address rather
+#      than that the resolver got lucky once.
+run E69 OK "OK: first-call ints=204" fwd ./tramp2
+
+# E70: and it really was resolved at the CALL and not in a constructor. If
+#      anything ever moves the load back into the constructor, this notices.
+run E70 OK "none resolved yet" fwd env ANYLINUX_LIB_DEBUG=1 ./tramp2
+
+# E71/E71b: B4, asked of /proc/self/maps. Same binary, one argument apart: a
+#      process that links the soname and calls nothing must not map the target,
+#      and the same process that makes ONE call must. Single-sided, E71 would
+#      also pass if the shim were simply broken.
+run E71  OK "shim mapped=1 target mapped=0" fwd ./mapped
+run E71b OK "shim mapped=1 target mapped=1" fwd ./mapped call
+
+# E72: B1. The entry point the host does not implement is CALLED, and the shim
+#      names it. Before the resolver existed this returned zero in silence,
+#      which is the failure mode this repository warns about most.
+run E72 OK "ABSENT entry point called: t_absent" \
+    fwd env ANYLINUX_LIB_DEBUG=1 ./tramp2
+
+# E73: and the number an application can now be measured by -- how much of a
+#      dispatcher it actually touches. Five names, four the host has, five
+#      called. This is the counter B6 needs to stop guessing with.
+run E73 OK "5 of 5 entry points were CALLED (4 forwarded, 1 absent)" \
+    fwd env ANYLINUX_LIB_DEBUG=1 ./tramp2
+
+echo
 echo "================================================================"
 echo " predictions matched: $PASS   mismatched: $FAIL"
 echo "================================================================"

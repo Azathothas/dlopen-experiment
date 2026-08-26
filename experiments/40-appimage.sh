@@ -798,15 +798,53 @@ else
         verdict E68 0 "self-forward guard did not fire (rc=$rc)"
     fi
 
-    # How much of the dispatcher the host can actually stand behind. Reported
-    # rather than asserted: the number is a property of the host's Mesa, and a
-    # threshold here would be a threshold on somebody else's packaging.
-    use_gl_shims gl
-    env ANYLINUX_LIB_FOREIGN_DLOPEN=1 ANYLINUX_LIB_DEBUG=1 APPDIR="$APPDIR" \
-        EGL_PLATFORM=surfaceless timeout -k 2 30 xvfb-run -a -s "$XA" \
-        "$APPDIR"/AppRun.sh glprobe 2>&1 </dev/null |
-      grep -m1 'entry points resolved' | sed 's/^ *\[gl-fwd.so\] >> /         /'
+    # E74/E74b: what the shims cost a process that never draws. The old
+    #      constructor loaded the host GL stack in EVERY process that had the
+    #      shims in .preload, Vulkan-only ones included -- 30 MB of host Mesa
+    #      mapped into something that would never call it (REPORT.md 9.9).
+    #      Nothing resolves until something calls now, and this is that claim at
+    #      AppImage scale rather than in the four-symbol object E71 uses.
+    #      Both sides, because "no GL was loaded" is also what a broken shim
+    #      would produce: E74b is the same command after a GL call.
+    use_gl_shims gl egl
+    vkout=$(env ANYLINUX_LIB_FOREIGN_DLOPEN=1 ANYLINUX_LIB_DEBUG=1 APPDIR="$APPDIR" \
+            "$LD" --library-path "$LP" --preload "$LP/foreign-dlopen.so $LP/gl-fwd.so $LP/egl-fwd.so" \
+            /w/build/vkprobe 2>&1)
+    if printf '%s' "$vkout" | grep -q 'entry points resolved'; then
+        verdict E74 0 "a Vulkan-only run still resolved the GL stack"
+    else
+        verdict E74 1 "Vulkan-only run: $(printf '%s' "$vkout" | grep -c 'loads at the first GL call') shim(s) loaded, 0 resolved, no host GL mapped"
+    fi
+    : > /tmp/gl_case.out
+    env ANYLINUX_LIB_FOREIGN_DLOPEN=1 APPDIR="$APPDIR" ANYLINUX_LIB_DEBUG=1 \
+        LIBGL_ALWAYS_SOFTWARE=1 timeout -k 2 30 xvfb-run -a -s "$XA" \
+        "$APPDIR"/AppRun.sh glprobe > /tmp/gl_case.out 2>&1 </dev/null
     pkill -9 Xvfb 2>/dev/null; rm -f /tmp/.X*-lock 2>/dev/null
+    if grep -q 'entry points resolved' /tmp/gl_case.out; then
+        verdict E74b 1 "the same shims, after a GL call: $(grep -m1 -o '[0-9]* of [0-9]* entry points resolved' /tmp/gl_case.out)"
+    else
+        verdict E74b 0 "a GL run did NOT resolve the stack, so E74 measures nothing"
+    fi
+
+    # How much of the dispatcher the host can actually stand behind, and how
+    # much of it the application TOUCHED. Reported rather than asserted: the
+    # first number is a property of the host's Mesa and the second of the
+    # program, and a threshold on either would be a threshold on somebody
+    # else's work.
+    grep -m1 'entry points resolved' /tmp/gl_case.out |
+        sed 's/^ *\[gl-fwd.so\] >> /         /'
+    grep -m1 'entry points were CALLED' /tmp/gl_case.out |
+        sed 's/^ *\[gl-fwd.so\] >> /         /'
+    # And the names, when there are any: B1's whole point is that an absent
+    # entry point an application actually reaches is now a line and not a zero.
+    nab=$(grep -c 'ABSENT entry point called' /tmp/gl_case.out)
+    if [ "$nab" -gt 0 ]; then
+        echo "         absent entry points this application reached: $nab"
+        grep -o 'ABSENT entry point called: [A-Za-z0-9_]*' /tmp/gl_case.out |
+            sed 's/.*: /           /' | sort -u | head -8
+    else
+        echo "         absent entry points this application reached: 0"
+    fi
 
     use_gl_shims
 fi

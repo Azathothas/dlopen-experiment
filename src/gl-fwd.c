@@ -48,6 +48,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -125,6 +126,39 @@ static void glfwd_log(const char *fmt, ...) {
  */
 extern void glfwd_absent(void) __attribute__((visibility("hidden")));
 
+/*
+ * glfwd_resolve_asm is the other thing a slot can hold, and it is why a slot
+ * can now do something a plain address cannot: RUN CODE at the first call of
+ * one particular entry point.
+ *
+ * The problem it solves. A table slot is an address; whoever jumps through it
+ * arrives with no idea WHICH slot they came from, so the old design had to
+ * decide every entry point's fate in a constructor -- a real address or a
+ * silent zero-returning stub -- before the application had asked for anything.
+ * That forced two things this file used to carry as defects: the host GL stack
+ * was loaded in every process whether or not it would ever be used, and an
+ * entry point the host does not implement was indistinguishable, from outside,
+ * from one that worked and returned zero.
+ *
+ * The repair is the index. Each trampoline knows its own index at ASSEMBLY
+ * time, so it loads it into a register the ABI already allows a call to
+ * destroy -- %r11 on x86-64, the register the PLT itself clobbers; x17/IP1 on
+ * aarch64, which is reserved for exactly this class of veneer -- and then
+ * jumps through the slot as before. A resolved slot ignores it. An unresolved
+ * slot points here, and here the index is the whole message.
+ *
+ * What this costs the fast path is one immediate load per call, on a path that
+ * is about to enter a graphics driver. What it buys is B1 and B4.
+ *
+ * This is _dl_runtime_resolve minus the bookkeeping: save everything an
+ * argument can arrive in, call a C function, put it all back, tail-jump to
+ * whatever it decided. The saved set is the SysV argument registers plus %rax
+ * (the varargs float count) and %r10 (the static chain, which glibc's own
+ * trampoline does not preserve and which costs 8 bytes to get right).
+ */
+extern void glfwd_resolve_asm(void) __attribute__((visibility("hidden")));
+__attribute__((visibility("hidden"))) void *glfwd_resolve_one(int index);
+
 #if defined(__x86_64__)
 /* endbr64 is spelled as bytes so the floor's assembler cannot be too old for
  * it, and it is present because an application built with indirect-branch
@@ -139,8 +173,67 @@ __asm__(".text\n"
         "	xor  %eax, %eax\n"
         "	ret\n"
         ".size glfwd_absent, .-glfwd_absent\n");
+/*
+ * `and $-16,%rsp` after saving %rbp is what makes the alignment unconditional
+ * rather than argued: the ABI says %rsp+8 is 16-aligned on entry, but a
+ * trampoline is reached from anywhere and the movaps below FAULT on a
+ * misaligned address. %rbp restores the caller's %rsp whatever it was.
+ * The C resolver is hidden, so `call` is PC-relative and cannot be preempted
+ * into some other object's idea of what resolving means.
+ */
+__asm__(".text\n"
+        ".globl  glfwd_resolve_asm\n"
+        ".hidden glfwd_resolve_asm\n"
+        ".type   glfwd_resolve_asm,@function\n"
+        "glfwd_resolve_asm:\n"
+        "	.byte 0xf3,0x0f,0x1e,0xfa\n"
+        "	push %rbp\n"
+        "	mov  %rsp, %rbp\n"
+        "	and  $-16, %rsp\n"
+        "	sub  $192, %rsp\n"
+        "	mov  %rax,    0(%rsp)\n"
+        "	mov  %rdi,    8(%rsp)\n"
+        "	mov  %rsi,   16(%rsp)\n"
+        "	mov  %rdx,   24(%rsp)\n"
+        "	mov  %rcx,   32(%rsp)\n"
+        "	mov  %r8,    40(%rsp)\n"
+        "	mov  %r9,    48(%rsp)\n"
+        "	mov  %r10,   56(%rsp)\n"
+        "	movaps %xmm0, 64(%rsp)\n"
+        "	movaps %xmm1, 80(%rsp)\n"
+        "	movaps %xmm2, 96(%rsp)\n"
+        "	movaps %xmm3,112(%rsp)\n"
+        "	movaps %xmm4,128(%rsp)\n"
+        "	movaps %xmm5,144(%rsp)\n"
+        "	movaps %xmm6,160(%rsp)\n"
+        "	movaps %xmm7,176(%rsp)\n"
+        "	mov  %r11d, %edi\n"
+        "	call glfwd_resolve_one\n"
+        "	mov  %rax, %r11\n"
+        "	movaps 64(%rsp), %xmm0\n"
+        "	movaps 80(%rsp), %xmm1\n"
+        "	movaps 96(%rsp), %xmm2\n"
+        "	movaps 112(%rsp),%xmm3\n"
+        "	movaps 128(%rsp),%xmm4\n"
+        "	movaps 144(%rsp),%xmm5\n"
+        "	movaps 160(%rsp),%xmm6\n"
+        "	movaps 176(%rsp),%xmm7\n"
+        "	mov     0(%rsp), %rax\n"
+        "	mov     8(%rsp), %rdi\n"
+        "	mov    16(%rsp), %rsi\n"
+        "	mov    24(%rsp), %rdx\n"
+        "	mov    32(%rsp), %rcx\n"
+        "	mov    40(%rsp), %r8\n"
+        "	mov    48(%rsp), %r9\n"
+        "	mov    56(%rsp), %r10\n"
+        "	mov  %rbp, %rsp\n"
+        "	pop  %rbp\n"
+        "	jmp  *%r11\n"
+        ".size glfwd_resolve_asm, .-glfwd_resolve_asm\n");
 /* No prologue: the callee sees the caller's registers and stack exactly as they
- * were, so the signature never has to be known here. */
+ * were, so the signature never has to be known here. %r11 is the one register
+ * the SysV ABI lets a PLT destroy, which is precisely what makes it free to
+ * carry the index through a call boundary. */
 #define GLFWD_TRAMPOLINE(i, n)                                                     \
 	__asm__(".text\n"                                                         \
 	        ".globl " #n "\n"                                                 \
@@ -148,12 +241,12 @@ __asm__(".text\n"
 	        ".p2align 4\n"                                                    \
 	        #n ":\n"                                                          \
 	        "	.byte 0xf3,0x0f,0x1e,0xfa\n"                                  \
+	        "	mov $" #i ", %r11d\n"                                         \
 	        "	jmp *glfwd_tab+8*" #i "(%rip)\n"                              \
 	        ".size " #n ", .-" #n "\n");
 #elif defined(__aarch64__)
-/* UNVERIFIED ON HARDWARE: this machine is x86_64, so the aarch64 form is only
- * assembled (make gl-fwd-asm-check), never run. Same caveat as the arch
- * parameterisation in runtime-select.c, and recorded the same way. */
+/* Assembled here, and RUN under qemu-user on an aarch64 image -- see
+ * `make gl-fwd-qemu-check` and REPORT.md 10. Not run on aarch64 silicon. */
 __asm__(".text\n"
         ".globl  glfwd_absent\n"
         ".hidden glfwd_absent\n"
@@ -164,6 +257,46 @@ __asm__(".text\n"
         "	movi d0, #0\n"
         "	ret\n"
         ".size glfwd_absent, .-glfwd_absent\n");
+/* x0-x7 are the argument registers, x8 the indirect-result pointer, q0-q7 the
+ * floating-point arguments, and x30 the return address a `bl` would destroy.
+ * x9-x15 are caller-saved and carry no argument, so they are not saved. */
+__asm__(".text\n"
+        ".globl  glfwd_resolve_asm\n"
+        ".hidden glfwd_resolve_asm\n"
+        ".type   glfwd_resolve_asm,%function\n"
+        "glfwd_resolve_asm:\n"
+        "	hint #34\n"
+        "	stp x29, x30, [sp, #-16]!\n"
+        "	mov x29, sp\n"
+        "	sub sp, sp, #208\n"
+        "	stp q0, q1, [sp, #0]\n"
+        "	stp q2, q3, [sp, #32]\n"
+        "	stp q4, q5, [sp, #64]\n"
+        "	stp q6, q7, [sp, #96]\n"
+        "	stp x0, x1, [sp, #128]\n"
+        "	stp x2, x3, [sp, #144]\n"
+        "	stp x4, x5, [sp, #160]\n"
+        "	stp x6, x7, [sp, #176]\n"
+        "	str x8, [sp, #192]\n"
+        "	mov w0, w17\n"
+        "	bl  glfwd_resolve_one\n"
+        "	mov x16, x0\n"
+        "	ldp q0, q1, [sp, #0]\n"
+        "	ldp q2, q3, [sp, #32]\n"
+        "	ldp q4, q5, [sp, #64]\n"
+        "	ldp q6, q7, [sp, #96]\n"
+        "	ldp x0, x1, [sp, #128]\n"
+        "	ldp x2, x3, [sp, #144]\n"
+        "	ldp x4, x5, [sp, #160]\n"
+        "	ldp x6, x7, [sp, #176]\n"
+        "	ldr x8, [sp, #192]\n"
+        "	add sp, sp, #208\n"
+        "	ldp x29, x30, [sp], #16\n"
+        "	br  x16\n"
+        ".size glfwd_resolve_asm, .-glfwd_resolve_asm\n");
+/* x16 was already the branch register, so the index rides in x17. Both are the
+ * intra-procedure-call scratch registers, which exist to be destroyed by
+ * exactly this kind of veneer. */
 #define GLFWD_TRAMPOLINE(i, n)                                                     \
 	__asm__(".text\n"                                                         \
 	        ".globl " #n "\n"                                                 \
@@ -171,6 +304,7 @@ __asm__(".text\n"
 	        ".p2align 4\n"                                                    \
 	        #n ":\n"                                                          \
 	        "	hint #34\n"                                                   \
+	        "	mov  w17, #" #i "\n"                                          \
 	        "	adrp x16, glfwd_tab+8*" #i "\n"                               \
 	        "	ldr  x16, [x16, #:lo12:glfwd_tab+8*" #i "]\n"                 \
 	        "	br   x16\n"                                                   \
@@ -180,12 +314,26 @@ __asm__(".text\n"
 #endif
 
 /* Hidden, so the trampolines reach it PC-relative with no GOT hop and with no
- * chance of another object preempting the table out from under them. */
+ * chance of another object preempting the table out from under them.
+ *
+ * Every slot starts at the resolver, not at an address: nothing is decided
+ * until the application calls something. A slot is written exactly once, by
+ * the first call to that name, and after that the trampoline is the same two
+ * useful instructions it always was. */
 __attribute__((visibility("hidden"))) void *glfwd_tab[GLFWD_COUNT] = {
-#define GLFWD_SYM(i, n) [i] = (void *)(void (*)(void))glfwd_absent,
+#define GLFWD_SYM(i, n) [i] = (void *)(void (*)(void))glfwd_resolve_asm,
 #include GLFWD_TABLE
 #undef GLFWD_SYM
 };
+
+/* What dlsym said, once, when the target loaded: the address or NULL. Separate
+ * from glfwd_tab because they answer different questions. This one is "can
+ * this host do X at all", asked once for all GLFWD_COUNT names in a single
+ * pass; glfwd_tab is "has anything called X yet", which is what makes the
+ * absent case observable (B1) and the call count measurable (B6). Keeping the
+ * pass single is also what keeps the dlerror() damage to one moment -- see
+ * glfwd_fill_addr. */
+static void **glfwd_addr;
 
 /* Emit the trampolines. The arch-specific macro is bound to GLFWD_SYM only for
  * the length of this include: leaving it bound would silently win over the
@@ -370,15 +518,39 @@ static void *glfwd_open_target(const char **how) {
 	return NULL;
 }
 
-__attribute__((constructor))
-static void glfwd_init(void) {
+/* ------------------------------------------------- resolution, on first call */
+/*
+ * B4: nothing below here runs until the application calls a GL entry point.
+ * A process that links this shim and never draws -- every Vulkan-only binary
+ * in an AppDir that also ships a GL one -- pays for the mapping of this object
+ * and nothing else. Measured cost of the old eager constructor, and therefore
+ * of what this removes, is in REPORT.md 9.9.
+ */
+
+static void *glfwd_target;                 /* the object every slot forwards to */
+static const char *glfwd_how = "nothing";
+static int glfwd_resolved_count = -1;      /* -1 until the one dlsym pass runs */
+
+/* 0 untried, 1 a thread is inside the load, 2 done. Plain ints with explicit
+ * atomics rather than a mutex: pthread_mutex_lock lives in libpthread on the
+ * glibc 2.31 floor this is built against, and a shim is a bad place to acquire
+ * a new DT_NEEDED. */
+static int glfwd_load_state;
+/* The load can re-enter this file on the SAME thread: the host GL stack's own
+ * constructors run inside our dlopen, this shim preempts the soname they were
+ * linked against, and a constructor that calls one of its own entry points
+ * arrives back here. Waiting for ourselves would be a hang; TLS turns it into
+ * one zero-returning call. */
+static __thread int glfwd_in_load;
+
+static void glfwd_load_target(void) {
 	const char *how = "nothing";
 	void *target = glfwd_open_target(&how);
 	if (!target) {
-		/* Every slot still points at glfwd_absent, so GL calls return zero and
-		 * the application prints its own documented failure instead of crashing
-		 * through a NULL. Say so: "no vendor" and "no host library" produce the
-		 * same message from the application. */
+		/* Every slot still resolves to glfwd_absent, so GL calls return zero
+		 * and the application prints its own documented failure instead of
+		 * crashing through a NULL. Say so: "no vendor" and "no host library"
+		 * produce the same message from the application. */
 		glfwd_log("%s: no target; all %d entry points return zero\n",
 		          GLFWD_SONAME, (int)GLFWD_COUNT);
 		dlerror();
@@ -411,16 +583,44 @@ static void glfwd_init(void) {
 	}
 	dlerror();
 
+	glfwd_target = target;
+	glfwd_how = how;
+}
+
+/*
+ * One pass, once, over every name -- and the reason it is one pass rather than
+ * a dlsym per first call is dlerror().
+ *
+ * dlsym leaves a message behind on every miss, and reading dlerror() to clear
+ * it is destructive: whatever the APPLICATION had pending is gone. Resolving
+ * lazily per name would put that theft inside an arbitrary GL call, once per
+ * absent name. Doing the whole table in one pass confines it to a single
+ * moment -- the first GL call in the process -- and says so under debug when
+ * something was actually taken.
+ */
+static void glfwd_fill_addr(void) {
+	glfwd_addr = calloc(GLFWD_COUNT, sizeof *glfwd_addr);
+	if (!glfwd_addr) {
+		glfwd_log("%s: out of memory for the resolution table; every entry "
+		          "point returns zero\n", GLFWD_SONAME);
+		return;
+	}
+	if (!glfwd_target) {
+		/* No target: nothing is resolvable, and saying so as 0 keeps the exit
+		 * report from printing the -1 that means "never asked". */
+		glfwd_resolved_count = 0;
+		return;
+	}
+
 	/* Read as a pointer, called as a function: forbidden by C, required by
 	 * POSIX, and the cast through a union is how you say so without inviting
 	 * -Wpedantic to argue about it. */
 	union { void *p; void *(*fn)(const unsigned char *); } getproc;
-	getproc.p = dlsym(target, GLFWD_GETPROC);
-	dlerror();
+	getproc.p = dlsym(glfwd_target, GLFWD_GETPROC);
 
 	int got = 0, via_dlsym = 0, via_getproc = 0;
 	for (int i = 0; i < (int)GLFWD_COUNT; i++) {
-		void *p = dlsym(target, glfwd_names[i]);
+		void *p = dlsym(glfwd_target, glfwd_names[i]);
 		if (p) {
 			via_dlsym++;
 		} else if (getproc.fn) {
@@ -431,21 +631,160 @@ static void glfwd_init(void) {
 				via_getproc++;
 		}
 		if (p) {
-			glfwd_tab[i] = p;
+			glfwd_addr[i] = p;
 			got++;
 		}
 	}
-	/* dlsym sets a message on every miss and the application is entitled to a
-	 * clean dlerror(). Same destructive-dlerror family as the two already
-	 * recorded in foreign-dlopen.c, reached from a third side. */
-	dlerror();
+	const char *stolen = dlerror();
+	if (stolen)
+		glfwd_log("note: resolving consumed a pending dlerror() -- \"%s\". "
+		          "dlsym's message cannot be put back; this is the one moment "
+		          "in the process where that can happen\n", stolen);
 
+	glfwd_resolved_count = got;
 	glfwd_log("%s: %d of %d entry points resolved from the %s "
 	          "(%d exported, %d via " GLFWD_GETPROC ", %d absent)\n",
-	          GLFWD_SONAME, got, (int)GLFWD_COUNT, how,
+	          GLFWD_SONAME, got, (int)GLFWD_COUNT, glfwd_how,
 	          via_dlsym, via_getproc, (int)GLFWD_COUNT - got);
-	if (got == 0)
+	if (got == 0 && glfwd_target)
 		glfwd_log("%s: NOT FORWARDED: the target loaded but provided none of "
 		          "the %d entry points, so every call returns zero\n",
 		          GLFWD_SONAME, (int)GLFWD_COUNT);
+}
+
+/* Returns 0 only when this thread is already inside the load. */
+static int glfwd_ensure_target(void) {
+	if (__atomic_load_n(&glfwd_load_state, __ATOMIC_ACQUIRE) == 2)
+		return 1;
+	if (glfwd_in_load)
+		return 0;
+
+	int expect = 0;
+	if (__atomic_compare_exchange_n(&glfwd_load_state, &expect, 1, 0,
+	                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		glfwd_in_load = 1;
+		glfwd_load_target();
+		glfwd_fill_addr();
+		glfwd_in_load = 0;
+		__atomic_store_n(&glfwd_load_state, 2, __ATOMIC_RELEASE);
+		return 1;
+	}
+	/* Another thread got there first. It is inside a dlopen, which finishes. */
+	while (__atomic_load_n(&glfwd_load_state, __ATOMIC_ACQUIRE) != 2)
+		sched_yield();
+	return 1;
+}
+
+/* How much of the dispatcher was actually USED, as opposed to available. The
+ * available number is a property of the host's Mesa; these two are a property
+ * of the application, and until now nothing here could count them.
+ *
+ * They are only a call count when the slots were lazy. Eager mode writes the
+ * resolved addresses straight into the table, so a call through one of those
+ * never reaches the resolver and cannot be counted -- glfwd_was_eager exists so
+ * the report says that rather than printing a number that means something else. */
+static int glfwd_called_fwd, glfwd_called_absent;
+static int glfwd_was_eager;
+
+/*
+ * The C half of the resolver. Reached exactly once per entry point per
+ * process: on return the caller writes the answer into the slot and every
+ * later call goes straight through.
+ */
+__attribute__((visibility("hidden")))
+void *glfwd_resolve_one(int index) {
+	void *absent = (void *)(uintptr_t)glfwd_absent;
+
+	/* Cannot happen -- the index is assembled into the trampoline -- so if it
+	 * ever does, the interesting thing is that it did. */
+	if (index < 0 || index >= (int)GLFWD_COUNT) {
+		glfwd_log("%s: resolver called with index %d, outside 0..%d; this is a "
+		          "corrupt trampoline, returning zero\n",
+		          GLFWD_SONAME, index, (int)GLFWD_COUNT - 1);
+		return absent;
+	}
+
+	if (!glfwd_ensure_target())
+		/* Re-entered from inside our own load. Answer THIS call with zero and
+		 * leave the slot unresolved, so the next call to the same name gets
+		 * the real address. Caching now would freeze a name as absent because
+		 * of the order it happened to be called in. */
+		return absent;
+
+	void *p = glfwd_addr ? glfwd_addr[index] : NULL;
+	if (p) {
+		__atomic_fetch_add(&glfwd_called_fwd, 1, __ATOMIC_RELAXED);
+	} else {
+		__atomic_fetch_add(&glfwd_called_absent, 1, __ATOMIC_RELAXED);
+		/* B1. THE POINT OF ALL OF THIS. Before this existed an entry point the
+		 * host does not implement returned zero and said nothing, which is the
+		 * exact failure mode this repository spends the most words warning
+		 * about -- and the shim had one by construction. One line, at the
+		 * first call, naming the entry point. Not fatal: returning zero is
+		 * what the application would get natively on this host, where the name
+		 * is equally absent. Fatal would be a policy decision about somebody
+		 * else's Mesa. */
+		if (glfwd_target)
+			glfwd_log("ABSENT entry point called: %s -- this host's %s has no "
+			          "implementation; returning zero\n",
+			          glfwd_names[index], GLFWD_SONAME);
+		p = absent;
+	}
+	__atomic_store_n(&glfwd_tab[index], p, __ATOMIC_RELEASE);
+	return p;
+}
+
+__attribute__((constructor))
+static void glfwd_init(void) {
+	/* B4: no dlopen here. The whole constructor is now one optional branch.
+	 *
+	 * ANYLINUX_GL_FWD_EAGER=1 restores the old behaviour -- resolve everything
+	 * before main() -- and exists so the cost of NOT doing that stays a
+	 * measurement rather than a memory. It is also the honest way to ask "how
+	 * much of this dispatcher could this host stand behind", which is a
+	 * question about the host and not about the run. */
+	const char *eager = getenv("ANYLINUX_GL_FWD_EAGER");
+	if (!(eager && strcmp(eager, "1") == 0)) {
+		glfwd_log("%s: %d entry points, none resolved yet -- the host stack "
+		          "loads at the first GL call, not here\n",
+		          GLFWD_SONAME, (int)GLFWD_COUNT);
+		return;
+	}
+	glfwd_was_eager = 1;
+	glfwd_ensure_target();
+	for (int i = 0; i < (int)GLFWD_COUNT; i++)
+		if (glfwd_addr && glfwd_addr[i])
+			glfwd_tab[i] = glfwd_addr[i];
+}
+
+__attribute__((destructor))
+static void glfwd_report(void) {
+	if (!glfwd_debug())
+		return;
+	if (__atomic_load_n(&glfwd_load_state, __ATOMIC_ACQUIRE) != 2) {
+		glfwd_log("%s: not one entry point was called in this process\n",
+		          GLFWD_SONAME);
+		return;
+	}
+	if (glfwd_was_eager) {
+		/* Say what was NOT measured rather than print a smaller number under
+		 * the same words. Eager patches the resolved slots before main(), so
+		 * calls through them never reach the resolver; only the absent ones
+		 * still do, and only they can be counted. */
+		glfwd_log("%s: EAGER: %d of %d entry points were resolved before "
+		          "main(), so the forwarded call count is not measured here. "
+		          "%d absent entry point(s) were called\n",
+		          GLFWD_SONAME, glfwd_resolved_count, (int)GLFWD_COUNT,
+		          glfwd_called_absent);
+		return;
+	}
+	/* The number B6 is about: 3470 forwarded entry points, and how many an
+	 * application actually touches. Reported, never thresholded -- it is a
+	 * property of the application, and a bar here would be a bar on somebody
+	 * else's program. */
+	glfwd_log("%s: %d of %d entry points were CALLED (%d forwarded, %d absent) "
+	          "out of %d this host could resolve\n",
+	          GLFWD_SONAME, glfwd_called_fwd + glfwd_called_absent,
+	          (int)GLFWD_COUNT, glfwd_called_fwd, glfwd_called_absent,
+	          glfwd_resolved_count);
 }
