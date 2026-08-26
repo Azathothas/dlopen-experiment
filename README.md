@@ -290,6 +290,13 @@ classified. It found `libdecor-0.so.0`, which turned out to be benign -- but
 
 ## What is not done
 
+⭐ **The OpenGL result is real and its claim is currently wider than its
+evidence.** It is measured on one host family -- musl Alpine, classic Mesa, two
+Mesa versions -- in software, with two applications, one of which was written
+for the purpose. [`CONTINUE.md`](CONTINUE.md) section 4.0 is the eight named
+limits in the order they should be closed, and it is the work order; this
+section is what a user needs to know, not what a contributor should do next.
+
 - **Two of the glibc-vs-musl struct hazards are real and cannot be fixed here.**
   Measured, not assumed: every field the probe checks sits at the same offset in
   both, so `rusage`, `sched_param` and `stat` cross harmlessly. What does not is
@@ -343,7 +350,11 @@ bridge.
 ```
 README.md                          this file
 REPORT.md                          full measured results, per test
-CONTINUE.md                        state and next steps for a fresh start
+CONTINUE.md                        state and next steps for a fresh start;
+                                   section 4.0 is the work order
+PORTING.md                         standalone brief for the session that takes
+                                   this production-grade; read by a fresh agent
+                                   and by nobody else
 analysis/                          Phase A measurements, and the C/D verdict
 
 src/foreign-dlopen.c               the patched loader

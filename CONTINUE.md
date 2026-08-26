@@ -40,12 +40,24 @@ libc family is in the process. On a glibc host it drives NVIDIA's closed-source
 CUDA userspace on a real RTX 3050 Ti and renders OpenGL on that GPU at over 100
 FPS. Section 3.3 reproduces all of it in one command.
 
-**Do not read section 4 as "the experiment is closed".** The previous handover
-said that, and it was true of the question as it had been framed and false of
-the thing the user actually wanted. What section 4 lists is what is blocked by
-hardware, by packaging, or by the permission rule in section 8. What it cannot
-list is a gap nobody has framed yet, and section 5 now has a subsection about
-how the last one hid.
+**Go to section 4.0 next.** It is the work order, and it exists because the
+answer to "does this work on systems without glvnd" is **yes, but** rather than
+either "no" or a clean "yes". The result is real and measured; the claim around
+it is currently wider than the evidence, in eight named ways, and 4.0 is those
+eight in the order they should be closed.
+
+**Do not read section 4 as "the experiment is closed".** The handover before
+this one said that, and it was true of the question as it had been framed and
+false of the thing anyone running the AppImage wants. Sections 4.2 and 4.3 are
+what is blocked by hardware, by packaging, or by the permission rule in section
+8. What no section can list is a gap nobody has framed yet, and section 5.0 is
+about how the last one hid.
+
+**When 4.0 is closed, the next thing is not more experiments.**
+[`PORTING.md`](PORTING.md) is a standalone brief for a separate session that
+takes this repository production-grade under
+[Azathothas/TEMPLATE](https://github.com/Azathothas/TEMPLATE). It requires no
+other document and deliberately does not assume this one has been read.
 
 ## 2. Environment
 
@@ -266,6 +278,45 @@ the single most misleading failure in this repository.
 
 ## 4. What was blocking it, and what is left
 
+### 4.0 START HERE: the priority for the next session
+
+The question asked of the last session was: **did you get this to work on
+systems without glvnd?** The honest answer is **yes, but**, and this subsection
+is the list of "buts" in the order they should be closed. Everything else in
+section 4 is blocked by hardware or by packaging. This list is not: every item
+on it is work that can be done on this machine, and each one narrows a claim
+that is currently wider than its evidence.
+
+**What is actually demonstrated.** On alpine:3.22 and alpine:3.15 -- musl,
+classic Mesa, no `libGLX_<vendor>.so.0` anywhere -- the demo AppImage's bundled
+glibc 2.44 drives the host's GL: `glxgears` renders (E62), `glprobe` clears to a
+known colour and reads `64 128 191 255` back out of the framebuffer (E64), and
+`eglprobe` gets a working surfaceless context (E66). On a glvnd host all three
+are unchanged, so the shim is transparent where GL already worked. That is a
+real result and it is not in doubt.
+
+**What is not demonstrated, in priority order:**
+
+| # | the "but" | why it matters | how to close it |
+|---|---|---|---|
+| **B1** | **1097 of 3470 entry points return zero and say nothing.** They forward to `glfwd_absent`. An application that links one gets a silent no-op, not a diagnostic | This is the difference between "works" and "works for the applications tried". A silent zero is the failure mode this repository spends the most words warning about, and the shim now has one by construction | Make the absent case observable without making it fatal: a one-line-per-name report at first call under `ANYLINUX_LIB_DEBUG=1`, which needs the register-saving resolver stub described in B2. Then measure which of the 1097 a real application actually touches -- likely zero, and "likely" is the problem |
+| **B2** | **The trampolines cannot report, because a table slot cannot run code.** The current design fills the table in a constructor and every slot is either a real address or a silent stub | It also forces the eager load in B4 and blocks per-symbol laziness | Write the x86-64 register-saving resolver: save `rdi rsi rdx rcx r8 r9 xmm0-7 rax`, call a C resolver with the index, restore, tail-jump. This is `_dl_runtime_resolve` minus the bookkeeping, ~60 lines, and it is the single change that unlocks B1 and B4 |
+| **B3** | **Only ONE non-glvnd host family has been tested: musl Alpine.** The other half of the claim -- pre-glvnd **glibc** distros, Ubuntu 14.04/16.04, Debian 8 -- is asserted, not measured, here | The README and REPORT 9 both say "every musl distro, and every pre-glvnd glibc distro". Half of that sentence has evidence | `ubuntu:14.04` and `ubuntu:16.04` still exist on Docker Hub; their apt repositories moved to `old-releases.ubuntu.com`, which is a `sources.list` rewrite, not a blocker. Add them as a third and fourth host to `appimage.ps1` and run E59-E68 there. Mesa 10.1 is also the one stack where the `_glapi_tls_Dispatch` case in REPORT 9.5 might reproduce, which would close a second open question at the same time |
+| **B4** | **The shims load the host GL stack in every process, GL or not.** Measured cost: +30 ms and +30 MB on a Vulkan-only run | Small, but it is 30 MB of host Mesa mapped into a process that will never call it, and the reason it is not gated is that the gate was judged too dangerous to write. With B2 done it becomes trivial: nothing resolves until something calls | Gate on first call, via B2's resolver. Delete the constructor's `dlopen` entirely |
+| **B5** | **No GLES shim.** `libGLESv2.so.2` and `libGLESv1_CM.so.1` are the same shape and are not covered | An AppImage bundling Mesa's GLES has the identical gap and would fail identically. The generator and the shim already do everything needed; this is a table and two `-D` flags | `make gl-syms` against a bundled `libGLESv2.so.2`, add the build rule, add an E-case. Note the demo AppDir bundles neither, so this needs an AppDir that does -- see B6 |
+| **B6** | **Two applications, one of which I wrote.** `glxgears` (33 GL symbols) and `glprobe` (15). Nothing real | 3470 forwarded entry points have been exercised at a rate of about 1%. The claim "it replaces libGL" rests on the export count, not on use | Build a demo AppDir around something with a real GL surface. `pkgforge-dev/Anylinux-AppImages` `useful-tools/demo/` has recipes for gtk3/gtk4/qt6/sdl/webkit2gtk AppImages; any of those on Alpine is a far harder test than `glxgears` |
+| **B7** | **Never on real silicon on the non-glvnd path.** Every GL result on Alpine is llvmpipe under Xvfb | The d3d12 path (E53) proves hardware GL works through the AppImage on a **glvnd** host. The classic-Mesa path has no hardware result at all | Alpine has no `d3d12_dri.so` (E53a's skip reason). Either build Mesa's d3d12 Gallium driver for Alpine, or accept this as hardware-blocked and say so in one sentence instead of leaving it implied |
+| **B8** | **aarch64 trampolines assemble and have never run.** `make gl-fwd-asm-check` produces correct instructions and relocations and proves nothing else | The repository already carries this caveat for `RS_LDSO` and `RS_TRIPLET`; `gl-fwd` adds hand-written assembly to it, which is a larger thing to be unverified | Hardware, or a qemu-user run under `--platform linux/arm64`. The second is cheap and worth trying before declaring it blocked |
+
+⭐ **B2 is the keystone.** B1 and B4 both reduce to it, and it is the one piece
+of genuinely new machinery. B3 is the highest-value item that needs no new
+machinery at all.
+
+⛔ **Do not start the port until B1, B2, B3 and B6 are closed.**
+[`PORTING.md`](PORTING.md) is written and waiting, and it is deliberately a
+separate session with a separate agent. Porting a claim that is wider than its
+evidence just publishes the gap.
+
 ### 4.1 The blocker, now fixed
 
 `vkEnumeratePhysicalDevices` returned `VK_ERROR_OUT_OF_HOST_MEMORY` with zero
@@ -300,21 +351,27 @@ The fix is [`src/version-compat.c`](src/version-compat.c) plus
 [`tools/version_traps.py`](tools/version_traps.py); REPORT.md 6.2 has the whole
 chain with the commands.
 
-### 4.2 What is genuinely left
+### 4.2 What is genuinely BLOCKED
 
-Everything on this list is blocked by hardware, by what a distribution ships,
-or by the permission rule in section 8. Nothing on it is merely unwritten. If
-you find yourself with time and a machine that unblocks a row, that row is the
-work; if not, the honest thing is to verify what is here rather than add to it.
+⭐ **This list and 4.0 are different lists and must stay different.** 4.0 is
+work that can be done on this machine. Everything here is blocked by hardware,
+by what a distribution ships, or by the permission rule in section 8, and
+nothing on it is merely unwritten. If you find yourself with a machine that
+unblocks a row, that row is the work; if not, the honest thing is to verify what
+is here rather than add to it.
+
+⚠ Three rows that were on this list have moved to 4.0, because they turned out
+not to be blocked: aarch64 can at least be RUN under qemu-user (B8), the 1097
+absent GL entry points can be made observable (B1), and the `_glapi_` case has
+a host that would settle it (B3). They are named here only so nobody restores
+them.
 
 | Item | Why it is not done | What would unblock it |
 |---|---|---|
 | **Vulkan on hardware** | Mesa's Vulkan-on-D3D12 driver (`dzn`) is `microsoft-experimental` and Debian does not package it, so every ICD result here is lavapipe. OpenGL *is* on hardware now (E53), through the `d3d12` **Gallium** driver, which Debian does package as `dri/d3d12_dri.so` | build Mesa with `-Dvulkan-drivers=microsoft-experimental`, then re-run the suite against that ICD. Watch for `libd3d12.so` being glibc-built: on Alpine the chain becomes musl-Mesa on a glibc D3D12 layer |
 | DRM-native drivers (`radv`, `anv`, `radeonsi`) | there is no `/dev/dri` anywhere on this machine. WSL2 publishes no DRM render nodes, so these three cannot initialise however much silicon is present | a non-WSL Linux host |
-| aarch64 | no aarch64 hardware; this machine is x86_64 (i7-12700H). The code is arch-parameterised (`RS_LDSO`, `RS_TRIPLET`, the `gl-fwd` trampolines, syscall number fallbacks) and that is unverified. `make gl-fwd-asm-check` assembles the aarch64 trampolines and nothing more | hardware |
-| The four unmeasured plugin boundaries | `libva`, `libvdpau`, `libasound` and the OpenCL ICD loader are the same shape as the OpenGL one and this AppDir bundles none of them, so there is nothing here to measure. `tools/plugin_boundaries.py` classifies them on sight if one turns up | an AppImage that bundles one of them, or building a demo AppDir that does |
-| The 1097 GL entry points with no host implementation | they are extensions glvnd knows the names of and Alpine's Mesa 25.1 has no code for. They forward to a stub that returns zero, which is what a native application gets on that host too | nothing. It is a property of the host's Mesa, and the shim reports the split rather than hiding it |
-| `_glapi_tls_Dispatch`-style undeclared imports on a shipping Mesa | the mechanism is measured (E54, E55) but no Mesa available here still relies on it: 25.1 has no separate `libglapi.so.0`, and 21.2's `swrast_dri.so` carries the `DT_NEEDED` edge. The report that motivates it is against Mesa 10.1, from outside this repo | a host with Mesa 10.x or a comparable pre-2015 DRI stack |
+| The unmeasured plugin boundaries | `libva`, `libvdpau`, `libasound`, `libpulse`, `libOpenCL` and `libgbm` are the same shape as the OpenGL one and this AppDir bundles none of them, so there is nothing here to measure. `tools/plugin_boundaries.py` classifies them on sight if one turns up. `libX11.so.6` IS bundled and its loadable-i18n boundary is unmeasured | an AppImage that bundles one of them -- which B6 in 4.0 would also produce |
+| No host implementation for 1097 of the GL entry points | a property of Alpine's Mesa 25.1, not of this repository: they are extensions glvnd knows the names of and that Mesa has no code for. Making the absent case OBSERVABLE is B1 in 4.0 and is not blocked; making Mesa implement them is not this project's work | nothing here. See B1 |
 | The two live ABI hazards | `regoff_t` is 4 bytes on glibc and 8 on musl, and the `FTW_*` values are off by one, so a musl-built object reads a glibc-filled `regmatch_t[]` or classifies an `nftw` entry wrongly (E50). An offset compiled into an object is not reachable from a preload | nothing in this repository. It is a property of the two libcs, and the useful output is the list of two, which E50 keeps honest |
 | Three residual library-path gaps upstream | the sharun fix is **upstreamed** ([Anylinux-sharun@`54208d2`](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537)) and the patch here is deleted. What that change does not reach is musl's `/etc/ld-musl-<arch>.path`, multiarch triplets past three, and the non-FHS prefixes; `analysis/ground-truth.md` has the measurement | a different repository, and section 8 forbids writing there |
 
