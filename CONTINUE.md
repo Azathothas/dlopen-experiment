@@ -9,6 +9,69 @@ full per-test results. This file is the working handover.
 
 ---
 
+## 0. Your assignment, if you were handed this file and nothing else
+
+⭐ **You are here to close section 4.0, in the order it gives.** Not to audit,
+not to summarise, not to confirm that it works. It does work; the claim around
+it is wider than the evidence in eight named ways and 4.0 is those eight.
+
+⚠ **Read that sentence twice, because the previous handover failed exactly
+here.** It presented a status, an agent read the status, concluded the
+experiment was closed, and a whole class of failure went unexamined for a
+session. Sections 4.2 and 4.3 are a status. 4.0 is the work.
+
+### Before you touch anything
+
+```powershell
+.\experiments\run.ps1
+```
+
+Expect **36/36**. ⛔ A MISMATCH *before* you have changed anything is a finding
+about this machine or about a container image that moved, and it is the first
+thing to understand -- not something to work around. Section 3 has the rest of
+the reproduction, and section 2 has the environment, including where podman is
+and how to reach the GPU. Neither is guessable.
+
+### While you work
+
+- ⛔ **State a prediction, then measure.** Every case in `experiments/` declares
+  what it expects and the harness reports MATCH or MISMATCH. **A MISMATCH is a
+  finding, not a harness bug**, and the correct response is to investigate
+  before coding.
+- ⛔ **Measured, or labelled UNVERIFIED. Never estimated.** That is this
+  repository's whole standard and every document is written to it.
+- ⛔ **Never single-sided.** Run the feature off and on. "It worked" cannot tell
+  a fix from a fallback that was already happening.
+- Section 7 is the invariants that must not break. Section 5 is everything that
+  has already cost somebody a day. Section 6 is what to do when it fails.
+
+### Before you finish
+
+1. Both suites green: `run.ps1` **36/36**, `appimage.ps1` **40/40** on the glibc
+   host and **35/35** with five named skips on musl.
+2. **Update 4.0 in place.** An item closes where it is written, with the
+   command that proves it and the output. ⛔ **A premise a measurement disproves
+   keeps its title and gets the correction written underneath it** -- never a
+   silent edit, because the title is how the item has been referred to.
+3. **Rewrite 4.3** so the next reader does not redo what you did.
+4. Update `README.md` and `REPORT.md` for anything a user or a reviewer would
+   now be told wrongly. ⚠ Every headline count appears in more than one
+   document today; if you change one, `git grep` for it.
+5. **Commit and push.** The owner has granted that standing, for this
+   repository, bounded by section 8. Anything section 8 forbids still stops and
+   asks.
+
+### What you are NOT here to do
+
+⛔ **Do not start the port.** [`PORTING.md`](PORTING.md) is a standalone brief
+for a *different* session with a *different* agent, and it should begin only
+once B1, B2, B3 and B6 are closed. Porting a claim wider than its evidence just
+publishes the gap. ⭐ If you have closed those four, say so plainly at the end of
+your session and stop; the next session picks up `PORTING.md` and needs nothing
+from this file.
+
+---
+
 ## 1. What this is
 
 An AppImage bundles its own glibc so it runs on any distro. It does **not**
