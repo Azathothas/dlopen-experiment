@@ -1386,6 +1386,16 @@ static const char *fgn_global_scope_libs[] = {
 
 __attribute__((constructor))
 static void fgn_load_global_scope_libs(void) {
+	// Idempotent, because it is also reachable from foreign_dlopen_init_now()
+	// below: another preload that has to load a host object may need this set
+	// present before its own constructor runs, and preload constructors run in
+	// REVERSE of the .preload order (E56), so "listed after us" means "runs
+	// before us". Doing it twice would be harmless but noisy in a trace.
+	static int done;
+	if (done)
+		return;
+	done = 1;
+
 	if (!foreign_dlopen_mode())
 		return;
 
@@ -1409,6 +1419,19 @@ static void fgn_load_global_scope_libs(void) {
 
 		DEBUG_PRINT("global-scope lib %s: %s\n", name, h ? "loaded" : "absent");
 	}
+}
+
+// Bring this preload fully up before the caller does something that depends on
+// it. The only caller is another preload -- gl-fwd.so -- whose constructor
+// dlopens a HOST library, and a host object with its musl libc edge dropped
+// needs the bundled libc runtime set already in the global scope. Preload
+// constructors run in reverse of the .preload order (E56), so no ordering of
+// that file puts this one first for every consumer, and an ordering rule that
+// depends on undocumented loader behaviour is not a rule worth having.
+//
+// Safe to call from anywhere and any number of times.
+VISIBLE void foreign_dlopen_init_now(void) {
+	fgn_load_global_scope_libs();
 }
 
 // core libraries are never stripped nor loaded twice, rewriting the
