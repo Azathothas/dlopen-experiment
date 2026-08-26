@@ -49,7 +49,12 @@ fi
 
 echo "================================================================"
 echo " a real application: gtk4-demo on musl Alpine"
-echo "   AppDir: $(ls "$LP" | wc -l) libraries, bundled glibc $(grep -ao 'release version [0-9.]*' "$LP/libc.so.6" 2>/dev/null | head -1 | awk '{print $3}' | sed 's/\.$//')"
+# An empty version here is the quietest possible way to be wrong -- it happened
+# once already, to the number this whole report is written against -- so say
+# UNREADABLE rather than printing nothing after the word "glibc".
+GLIBCV=$(grep -ao 'release version [0-9.]*' "$LP/libc.so.6" 2>/dev/null |
+         head -1 | awk '{print $3}' | sed 's/\.$//')
+echo "   AppDir: $(ls "$LP" | wc -l) libraries, bundled glibc ${GLIBCV:-UNREADABLE}"
 echo "   bundled vendor libraries: $(ls "$LP" | grep -cE '^lib(GLX|EGL)_')  bundled GLES: $(ls "$LP" | grep -c '^libGLESv2.so.2$')"
 echo "================================================================"
 

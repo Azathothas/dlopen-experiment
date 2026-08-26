@@ -20,7 +20,7 @@ Every claim is either backed by a command whose output is quoted, or labelled
 | Completion criterion | Status |
 |---|---|
 | Both goals demonstrated by a test that fails before and passes after | **Yes.** Goal 1: E5, E12. Goal 2: E22/E23 for the mechanism, E30/E32 and E37a/E37 for the end-to-end |
-| The evidence harness still reports all predictions held | **Yes, 36/36**, up from 22/22. The AppImage suite adds 40 on a glibc host and 35 on a musl host, with every unrunnable case SKIPPED by the capability it lacks |
+| The evidence harness still reports all predictions held | **Yes, 46/46**, up from 22/22. The AppImage suite adds 45 on a glvnd glibc host, 40 on musl, 26 on each of two pre-glvnd glibc hosts and 7 on a real-application stage, with every unrunnable case SKIPPED by the capability it lacks |
 | No host file modified, verified by checksum | **Yes.** T4.3, identical sha256 before and after |
 | Bundled libraries still win, verified via `dladdr` | **Yes.** T4.2, all resolved under `$APPDIR` |
 | A forward-compatibility story that does not depend on foresight | **Yes.** Host-runtime selection for the unenumerable gap, a generated shim for the enumerable one, and a build-time audit (E26) for the version traps |
@@ -1136,7 +1136,7 @@ wrong.
 
 ### Tier 1, the evidence table
 
-`experiments/run.ps1` reports **36/36 predictions held**. E1 through E13
+`experiments/run.ps1` reports **46/46 predictions held**. E1 through E13
 measure the problem. E14 through E21 are one per fix from the first pass: the
 ELF self-test, the generated-shim compile and behaviour, and five selector
 decisions including the mixed-set guard and its control. E22 through E29 are
@@ -1164,7 +1164,7 @@ that the mechanism is the only thing being measured:
 ### Tier 1b, the AppImage end-to-end suite
 
 `experiments/appimage.ps1` runs a real AppImage against a real host driver on
-two hosts and reports **40/40 on glibc** with no skips and **35/35 with five
+five stages and reports **45/45 on glvnd glibc** with no skips and **40/40 with five
 named skips on musl**. It fetches the demo AppImage once (sha256 verified),
 extracts it in a container because the payload is DwarFS, builds `src/` on the
 glibc 2.31 floor, builds the musl half of the ABI probe on Alpine, and then
@@ -1671,8 +1671,10 @@ with a different table and a different vendor marker.
 E67 is the regression case: the shims are preloaded for every binary in the
 AppDir, `vkcube` included, and the Vulkan path is unaffected.
 
-Totals with this section in: **35/35 on the musl host** with five named skips,
-**40/40 on the glibc host** with none, and **36/36** in the container suite.
+Totals with this section in: **40/40 on the musl host** with five named skips,
+**45/45 on the glvnd glibc host** with none, **26/26** on each of ubuntu:14.04
+and ubuntu:16.04 with nineteen named skips, **7/7** on the gtk4 stage, and
+**46/46** in the container suite.
 
 ### 9.8 What the shim does not do, stated as a number
 
@@ -1933,8 +1935,8 @@ generated trampolines did not. One real application did, on the first run.
 ## 10. Measured versus assumed
 
 **Measured:** every table and quoted output above, plus `experiments/run.ps1`
-(36/36), `experiments/appimage.ps1` (40/40 glibc, 35/35 musl with five named
-skips), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
+(46/46), `experiments/appimage.ps1` (45/45 glvnd glibc, 40/40 musl with five
+named skips, 26/26 on each pre-glvnd glibc host, 7/7 on the gtk4 stage), `gap.py --fetch`, the eight-distro inventory, the AppImage inventory,
 the corpus test, and the five-distro `ld.so.cache` survey in
 `analysis/ground-truth.md`.
 

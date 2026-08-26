@@ -45,15 +45,20 @@ not exist. The repair is `src/gl-fwd.c`: an object built with the SONAME of the
 library it replaces, preloaded so `ld.so` binds the application's `DT_NEEDED` to
 it, forwarding all 3470 entry points of the bundled `libGL.so.1` to whichever
 target the host can actually stand behind. Built a second time with a different
-table it is `egl-fwd.so`.
+table it is `egl-fwd.so`, and a third time it is `gles-fwd.so` -- 358 entry
+points of `libGLESv2.so.2`, which is the dispatcher a real GTK4 application
+actually renders through.
 
-**What is measured.** Three suites, all green at the time this file was written:
+**What is measured.** Two commands and six stages, all green at the time this
+file was written:
 
 | suite | command | result |
 |---|---|---|
-| evidence table | `experiments/run.ps1` | 36/36 predictions held |
-| AppImage end to end, glibc host | `experiments/appimage.ps1` | 40/40, no skips |
-| AppImage end to end, musl host | same command | 35/35, five named skips |
+| evidence table | `experiments/run.ps1` | 46/46 predictions held |
+| AppImage end to end, glvnd glibc host | `experiments/appimage.ps1` | 45/45, no skips |
+| AppImage end to end, musl host | same command | 40/40, five named skips |
+| AppImage end to end, pre-glvnd glibc | same command | 26/26 on each of ubuntu:14.04 and ubuntu:16.04, nineteen named skips |
+| A real GTK4 application | same command | 7/7, no skips |
 
 Including a closed-source driver round-tripping 4096 bytes through a real NVIDIA
 RTX 3050 Ti, and OpenGL rendering on that GPU through the AppImage at over 100
@@ -203,6 +208,7 @@ that they must be compiled on `debian:bullseye-slim`, and to know why.
 | `foreign-dlopen.so` | `src/foreign-dlopen.c` + `forward-shim.c` + `version-compat.c` | must need no symbol newer than the oldest glibc it will run under |
 | `gl-fwd.so` | `src/gl-fwd.c` + `src/gl-fwd-gl.h` | SONAME **must** be `libGL.so.1`; must carry the IBT property note |
 | `egl-fwd.so` | `src/gl-fwd.c` + `src/gl-fwd-egl.h` | SONAME **must** be `libEGL.so.1` |
+| `gles-fwd.so` | `src/gl-fwd.c` + `src/gl-fwd-gles2.h` | SONAME **must** be `libGLESv2.so.2`; its table comes from an AppDir that BUNDLES GLES, which the host-drivers demo does not -- `make gles-syms GLES=<dir>` |
 | `runtime-select` | `src/runtime-select.c` | a normal executable, same floor rule |
 | the probes | `tests/*.c` | built on the floor, run under the bundled loader |
 
@@ -293,8 +299,13 @@ carries per-toolkit recipes: `vkcube-glxgears-appimage.sh` (this is the exact
 demo this repository has been testing against), plus gtk2/gtk3/gtk4, qt6-dbus,
 sdl, webkit2gtk4 and bun. `useful-tools/hooks/` is a hook system documented in
 `hook-system.md`. ⭐ **The example to write here is the one that matters most:
-take one of those demo recipes, add `gl-fwd.so` and `egl-fwd.so` to the AppDir's
-`.preload`, and show the before and after on a musl host.** The `.preload`
+take one of those demo recipes, add `gl-fwd.so`, `egl-fwd.so` and `gles-fwd.so`
+to the AppDir's `.preload`, and show the before and after on a musl host.**
+`experiments/47-gtk4.sh` already does exactly this against the prebuilt
+`gtk4-demo` release asset, and is the shortest thing to read first. ⚠ Note what
+it found: a self-contained AppImage that bundles its own vendor library must
+KEEP it -- forwarding it to the host's because the host has none puts two Mesas
+in one process. The `.preload`
 ordering does not matter, and `docs/` should say why -- preload constructors run
 in reverse of that file, which is why `foreign_dlopen_init_now()` exists.
 
@@ -452,14 +463,14 @@ is stale.
 
 ⚠ **This repository does not currently satisfy that rule, and you should know
 what you are walking into.** Measured at the time of writing: `3470` appears in
-five Markdown files, and `36/36`, `40/40` and `35/35` each appear in four. They
+five Markdown files, and `46/46`, `45/45` and `40/40` each appear in four. They
 all agree today because they were audited together; that is a snapshot, not a
 property. Every measured count gets exactly one home and a pointer from
 everywhere else, and a check that greps for the headline numbers and fails on a
 second occurrence is worth more than the edit that fixes them once:
 
 ```bash
-for n in 3470 36/36 40/40 35/35; do echo "== $n"; git grep -lF "$n" -- '*.md'; done
+for n in 3470 358 46/46 45/45 40/40 26/26; do echo "== $n"; git grep -lF "$n" -- '*.md'; done
 ```
 
 **Done when:** `TODO/INDEX.md` lists every open item, no agent-only file remains

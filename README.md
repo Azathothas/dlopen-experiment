@@ -16,7 +16,7 @@ The target is [Anylinux-AppImages](https://github.com/Samueru-sama/Anylinux-AppI
 `foreign-dlopen.c`.
 
 ```powershell
-.\experiments\run.ps1        # ~3 min, needs podman or docker. 36/36 predictions hold.
+.\experiments\run.ps1        # ~4 min, needs podman or docker. 46/46 predictions hold.
 .\experiments\appimage.ps1   # ~15 min, the end-to-end proof on a real AppImage
 ```
 
@@ -63,8 +63,8 @@ not a symbol problem at all and is not fixable by any amount of bridging;
 
 | Goal | Result | Proof |
 |---|---|---|
-| Evidence table still holds | **36/36**, up from 14/14 | [`experiments/run.ps1`](experiments/run.ps1), cases in [`30-run-tests.sh`](experiments/30-run-tests.sh) |
-| AppImage end to end, on a real host driver | **40/40 glibc, 35/35 musl** (five named skips) | [`experiments/appimage.ps1`](experiments/appimage.ps1), cases in [`40-appimage.sh`](experiments/40-appimage.sh) |
+| Evidence table still holds | **46/46**, up from 14/14 | [`experiments/run.ps1`](experiments/run.ps1), cases in [`30-run-tests.sh`](experiments/30-run-tests.sh) |
+| AppImage end to end, on five stages | **45/45** glvnd glibc, **40/40** musl (five named skips), **26/26** on each pre-glvnd glibc host (nineteen named skips), **7/7** on a real GTK4 application | [`experiments/appimage.ps1`](experiments/appimage.ps1), cases in [`40-appimage.sh`](experiments/40-appimage.sh) |
 | **OpenGL on a host whose Mesa has no glvnd vendor library** | **`glxgears` renders on Alpine**, and a cleared pixel comes back `64 128 191 255` through 3470 forwarded entry points | E61-E64, [`src/gl-fwd.c`](src/gl-fwd.c), [`tests/glprobe.c`](tests/glprobe.c), [REPORT.md 9](REPORT.md) |
 | **The same on pre-glvnd GLIBC distros** | **Ubuntu 14.04 (Mesa 10.1) and 16.04 (Mesa 18.0.5)**, the other half of "every musl distro and every pre-glvnd glibc distro" | E61-E66 on those hosts, [`experiments/46-host-ubuntu.sh`](experiments/46-host-ubuntu.sh) |
 | **A real GTK4 application, self-contained AppImage, on musl** | **runs**, and calls **46 GLES, 13 EGL and 1 GL** entry points -- GTK4's renderer is GLES | E80-E83, [`experiments/47-gtk4.sh`](experiments/47-gtk4.sh) |
@@ -390,10 +390,14 @@ src/runtime-select.c               host-runtime selection at exec time
 src/forward-shim.c                 GENERATED, do not edit
 src/forward-shim-manifest.json     per-symbol classification and the floor
 src/gl-fwd.c                       stand in for a bundled dispatcher the host
-                                   cannot serve; built twice, as gl-fwd.so and
-                                   egl-fwd.so
+                                   cannot serve; built THREE times, as
+                                   gl-fwd.so, egl-fwd.so and gles-fwd.so
 src/gl-fwd-gl.h                    GENERATED: 3470 libGL.so.1 entry points
 src/gl-fwd-egl.h                   GENERATED: 44 libEGL.so.1 entry points
+src/gl-fwd-gles2.h                 GENERATED: 358 libGLESv2.so.2 entry points
+src/ld-conf.h                      the ONE /etc/ld.so.conf walk, shared by
+                                   gl-fwd.c and runtime-select.c so the two
+                                   cannot drift into two answers
 src/Makefile                       build; `make shim` regenerates, `make traps`
                                    audits, `make gl-syms` re-reads the tables
 
@@ -491,6 +495,20 @@ SKIPPED with the missing capability named rather than dropped.
 | E65/E66 | `eglprobe`, GL shim only vs GL+EGL shims | musl: `EGL_NO_DISPLAY` -> **`OK: EGL is complete`** |
 | E67 | `vkcube` with both shims preloaded | **unaffected** |
 | E68 | the shim pointed at itself | refuses by name; the app gets its own failure instead of a stack overflow |
+| E69 | every argument shape through the register-saving resolver, twice | first call and second call agree |
+| E70 | was it resolved at the CALL or in a constructor | at the call |
+| E71 / E71b | links the soname and calls nothing / calls once | target **not mapped** / mapped |
+| E72 | an entry point the host does not implement, CALLED | **a line naming it**, and zero returned |
+| E73 | how much of a dispatcher an application touches | 5 of 5 called, 4 forwarded, 1 absent |
+| E74 / E74b | a Vulkan-only run with the shims / after a GL call | 0 resolved / 2373 resolved |
+| E75 / E75b | a target only `/etc/ld.so.conf` names, with and without the conf file | found / not found |
+| E76 / E76b | the aarch64 trampolines and resolver, under qemu-user | **run**, and the absent path with them |
+| E77 | the host driver's own dependencies, with the AppDir path alone | either it loads, or the process **names** the library |
+| E78 / E79 | the probes built and run NATIVELY on the host | what E64 and E66 are predicted against |
+| E80 / E80a | a real GTK4 application, with the shims and without | both survive; it used to SIGFPE with them |
+| E81 | which target a self-contained AppImage gets | its own bundled dispatcher |
+| E82 | the three tables against the objects they replace | 3470, 44 and 358, all resolved |
+| E83 | what gtk4-demo actually calls | 1 GL, 13 EGL, **46 GLES** |
 
 E41-E53 are this repository's last pass: a **closed-source** driver, the
 cross-libc ABI, and an actual GPU. Each is SKIPPED by name on a machine that

@@ -688,7 +688,9 @@ run E75 OK "target /opt/anylinux-unguessable-42/libtgt.so" fwd_noenv ./tramp2
 #       guessed the directory, which is the habit being removed.
 noconf
 run E75b FAIL "no target; all 5 entry points return zero" fwd_noenv ./tramp2
-confdir
+# Left REMOVED, not restored: section P runs after this one and its aarch64
+# shim would otherwise find the x86-64 libtgt.so through this very conf file.
+rm -rf /opt/anylinux-unguessable-42
 
 echo
 echo "-- P. the aarch64 trampolines, RUN -----------------------------"
@@ -717,7 +719,12 @@ if ! command -v qemu-aarch64-static >/dev/null 2>&1 ||
     skip E76 "no qemu-aarch64-static or aarch64-linux-gnu-gcc: apt-get install qemu-user-static gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
     skip E76b "as E76"
 else
-    mkdir -p a64 && cp gl-fwd.c ld-conf.h tgt.c tgt-fwd.h tramp2.c a64/ && cd a64
+    # Absolute, both ways: `cd a64 && ...` followed by `cd ..` walks out of
+    # /work entirely if the copy failed, and everything after it then runs
+    # somewhere unexpected.
+    mkdir -p /work/a64
+    cp gl-fwd.c ld-conf.h tgt.c tgt-fwd.h tramp2.c /work/a64/
+    cd /work/a64
     A64=aarch64-linux-gnu-gcc
     $A64 -shared -fPIC -O2 tgt.c -o libtgt.so -Wl,-soname,libtgt.so 2>/dev/null
     $A64 -shared -fPIC -O2 -Wall -Wextra -Wno-format-truncation \

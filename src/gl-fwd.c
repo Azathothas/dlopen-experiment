@@ -713,6 +713,21 @@ static void glfwd_fill_addr(void) {
 		return;
 	}
 
+	/* Read the pending message BEFORE the pass, not after.
+	 *
+	 * After the pass, dlerror() returns OUR last dlsym miss, and reporting
+	 * that as "the message we consumed" is a diagnostic that lies: it names a
+	 * symbol the application never asked for. Read first and the string is
+	 * genuinely whatever the application had outstanding -- reading it is what
+	 * destroys it, and there is no API to put it back, so the only honest
+	 * thing left is to say what was taken. */
+	const char *stolen = dlerror();
+	if (stolen)
+		glfwd_log("note: resolving is about to consume a pending dlerror() "
+		          "the application had not read -- \"%s\". dlsym's message "
+		          "cannot be put back; this is the one moment in the process "
+		          "where that can happen\n", stolen);
+
 	/* Read as a pointer, called as a function: forbidden by C, required by
 	 * POSIX, and the cast through a union is how you say so without inviting
 	 * -Wpedantic to argue about it. */
@@ -736,11 +751,8 @@ static void glfwd_fill_addr(void) {
 			got++;
 		}
 	}
-	const char *stolen = dlerror();
-	if (stolen)
-		glfwd_log("note: resolving consumed a pending dlerror() -- \"%s\". "
-		          "dlsym's message cannot be put back; this is the one moment "
-		          "in the process where that can happen\n", stolen);
+	/* Our own last miss, cleared so the application's next dlerror() is clean. */
+	dlerror();
 
 	glfwd_resolved_count = got;
 	glfwd_log("%s: %d of %d entry points resolved from the %s "

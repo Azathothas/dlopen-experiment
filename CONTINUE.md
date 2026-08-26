@@ -11,14 +11,27 @@ full per-test results. This file is the working handover.
 
 ## 0. Your assignment, if you were handed this file and nothing else
 
-⭐ **You are here to close section 4.0, in the order it gives.** Not to audit,
-not to summarise, not to confirm that it works. It does work; the claim around
-it is wider than the evidence in eight named ways and 4.0 is those eight.
+⭐ **Section 4.0 is closed. Your work is [`PORTING.md`](PORTING.md), and it
+needs nothing from this file.** Eight "buts" were named there, seven are closed
+with the command and the output under each one in 4.0.1, and the eighth (B7,
+hardware GL on a classic-Mesa host) is blocked by this machine for a reason
+4.2 states in one sentence. B1, B2, B3 and B6 -- the four the port was gated on
+-- are among the seven.
 
-⚠ **Read that sentence twice, because the previous handover failed exactly
-here.** It presented a status, an agent read the status, concluded the
-experiment was closed, and a whole class of failure went unexamined for a
-session. Sections 4.2 and 4.3 are a status. 4.0 is the work.
+⚠ **Read the next paragraph before you decide that means "finished", because
+the handover before last made exactly that mistake.** It presented a status, an
+agent read the status, concluded the experiment was closed, and a whole class
+of failure went unexamined for a session.
+
+What is closed is the list. ⛔ **What is not closed is the class of thing the
+list could not contain**, and this session is the second demonstration in a
+row: a real GTK4 application, run for the first time, found a bug that four
+synthetic cases, two host classes and 3470 generated trampolines had not (B6),
+and two items arrived from outside the repository entirely (B9, B10). If you
+are here to do more experiments rather than the port, the useful question is
+not "what is left on the list" -- it is **what has still never been run**.
+Section 5.0 is about the shape of that mistake and 4.2's last row names the
+cheapest instance of it still outstanding.
 
 ### Before you touch anything
 
@@ -26,7 +39,7 @@ session. Sections 4.2 and 4.3 are a status. 4.0 is the work.
 .\experiments\run.ps1
 ```
 
-Expect **36/36**. ⛔ A MISMATCH *before* you have changed anything is a finding
+Expect **46/46**. ⛔ A MISMATCH *before* you have changed anything is a finding
 about this machine or about a container image that moved, and it is the first
 thing to understand -- not something to work around. Section 3 has the rest of
 the reproduction, and section 2 has the environment, including where podman is
@@ -47,8 +60,10 @@ and how to reach the GPU. Neither is guessable.
 
 ### Before you finish
 
-1. Both suites green: `run.ps1` **36/36**, `appimage.ps1` **40/40** on the glibc
-   host and **35/35** with five named skips on musl.
+1. Both suites green: `run.ps1` **46/46**, and `appimage.ps1` **45/45** on the
+   glvnd glibc host, **40/40** with five named skips on musl, **26/26** with
+   nineteen named skips on each of ubuntu:14.04 and ubuntu:16.04, and **7/7**
+   on the gtk4 stage.
 2. **Update 4.0 in place.** An item closes where it is written, with the
    command that proves it and the output. ⛔ **A premise a measurement disproves
    keeps its title and gets the correction written underneath it** -- never a
@@ -61,14 +76,22 @@ and how to reach the GPU. Neither is guessable.
    repository, bounded by section 8. Anything section 8 forbids still stops and
    asks.
 
-### What you are NOT here to do
+### If you are here to port rather than to measure
 
-⛔ **Do not start the port.** [`PORTING.md`](PORTING.md) is a standalone brief
-for a *different* session with a *different* agent, and it should begin only
-once B1, B2, B3 and B6 are closed. Porting a claim wider than its evidence just
-publishes the gap. ⭐ If you have closed those four, say so plainly at the end of
-your session and stop; the next session picks up `PORTING.md` and needs nothing
-from this file.
+⭐ **Then start, and stop reading this file.** The gate the previous handover
+set -- "only once B1, B2, B3 and B6 are closed" -- is met, and it was set so
+that the port would not publish a claim wider than its evidence.
+[`PORTING.md`](PORTING.md) is standalone and deliberately assumes this file has
+not been read.
+
+Two things it will want that were not true when it was written: there are now
+**five** stages in `appimage.ps1` rather than two, and `src/` builds a third
+shim (`gles-fwd.so`). Its headline-count checklist is updated for both.
+
+⛔ **What you should still NOT do** is add to section 4.0. It is a closed list
+with a closure record per item; a new "but" belongs in 4.2 if it is blocked and
+in a new numbered item if it is not, but not appended to a table whose whole
+value now is that it was finished.
 
 ---
 
@@ -103,11 +126,13 @@ libc family is in the process. On a glibc host it drives NVIDIA's closed-source
 CUDA userspace on a real RTX 3050 Ti and renders OpenGL on that GPU at over 100
 FPS. Section 3.3 reproduces all of it in one command.
 
-**Go to section 4.0 next.** It is the work order, and it exists because the
-answer to "does this work on systems without glvnd" is **yes, but** rather than
-either "no" or a clean "yes". The result is real and measured; the claim around
-it is currently wider than the evidence, in eight named ways, and 4.0 is those
-eight in the order they should be closed.
+**Go to section 4.0 next.** It was the work order, and it existed because the
+answer to "does this work on systems without glvnd" was **yes, but** rather
+than either "no" or a clean "yes". Eight "buts" were named; seven are closed
+and one is hardware-blocked, so 4.0 now reads as a record rather than a queue,
+and **4.0.1 is where each closure is written with the command that proves it.**
+Two of the eight had premises that measurement disproved; both corrections are
+in 4.0.1 under the original titles.
 
 **Do not read section 4 as "the experiment is closed".** The handover before
 this one said that, and it was true of the question as it had been framed and
@@ -184,7 +209,7 @@ extracted AppDir there, so the second run is much faster than the first.
 .\experiments\run.ps1
 ```
 
-Expect **36/36 predictions held**. Run this before every commit. A MISMATCH is
+Expect **46/46 predictions held**. Run this before every commit. A MISMATCH is
 a finding, not a harness bug: investigate before coding.
 
 Three container stages over one shared volume: `alpine:3.22` builds a faithful
@@ -203,17 +228,33 @@ PYTHONPATH=<repo> py -3 <repo>/gap.py --fetch
 Expect the union over the Mesa+LLVM closure to be exactly
 `['___environ', 'atexit']`.
 
-### 3.3 The end-to-end proof (15 minutes the first time)
+### 3.3 The end-to-end proof (35 minutes the first time)
 
 ```powershell
-.\experiments\appimage.ps1
+.\experiments\appimage.ps1                  # all five stages
+.\experiments\appimage.ps1 -Only ubuntu1404 # or one of them
 ```
 
-Expect **40/40 on the glibc host** and **35/35 with five named skips on musl**.
+Five stages, not two: `alpine:3.22` (musl, classic Mesa), `debian:trixie-slim`
+(glibc, glvnd), `ubuntu:14.04` and `ubuntu:16.04` (glibc, **pre-glvnd** -- the
+third host class), and a fifth that is not a host at all but a different
+APPIMAGE: a real GTK4 application that bundles its own Mesa. `-Only` takes
+`alpine`, `debian`, `ubuntu1404`, `ubuntu1604`, `gtk4`, `both` or `all`.
+
+Expect **45/45** on the glvnd glibc host, **40/40** with five named skips on
+musl, **26/26** with nineteen named skips on each pre-glvnd glibc host, and
+**7/7** on the gtk4 stage.
 It downloads the demo AppImage once into `.tmp` (sha256 verified), extracts it
 inside a container because the payload is DwarFS, builds `src/` on the glibc
 2.31 **floor**, builds the musl half of the ABI probe on Alpine, and then runs
-the same suite on `alpine:3.22` and `debian:trixie-slim`.
+the same suite on each host. The gtk4 stage downloads a second AppImage
+(~30 MB, sha256 verified) and extracts it into its OWN directory -- the two
+AppDirs are different shapes and mixing them is not hypothetical; section 5.
+
+⚠ **The two Ubuntu hosts have no Vulkan at all** -- Mesa 10.1 predates it -- so
+sections A-E and H SKIP by name there while F, G and J still run. That is why
+their totals are 26 and not 45, and the nineteen skips are the count of what
+those hosts cannot be asked rather than of anything that failed.
 
 **On a machine with no GPU the count is lower and that is correct.** The driver
 probes for `/dev/dxg` plus a bind-mountable `/usr/lib/wsl` by running a
