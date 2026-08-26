@@ -210,13 +210,16 @@ static const char *const glfwd_names[GLFWD_COUNT] = {
  *
  * /usr/lib/<triplet>/mesa and /usr/lib/mesa are on the list because a Debian or
  * Ubuntu host with the alternatives layout keeps classic Mesa's libGL there and
- * glvnd's in the parent directory.
+ * glvnd's in the parent directory. The same distros keep classic Mesa's EGL in
+ * a *separate* alternatives directory, /usr/lib/<triplet>/mesa-egl (not mesa),
+ * so both names are listed for both library families.
  */
 static const char *const glfwd_host_dirs[] = {
 	"/usr/lib/" GLFWD_TRIPLET, "/lib/" GLFWD_TRIPLET,
 	"/usr/lib/" GLFWD_TRIPLET "/mesa",
-	"/usr/lib64", "/lib64", "/usr/lib64/mesa",
-	"/usr/lib", "/lib", "/usr/lib/mesa",
+	"/usr/lib/" GLFWD_TRIPLET "/mesa-egl",
+	"/usr/lib64", "/lib64", "/usr/lib64/mesa", "/usr/lib64/mesa-egl",
+	"/usr/lib", "/lib", "/usr/lib/mesa", "/usr/lib/mesa-egl",
 	"/usr/local/lib", "/usr/local/lib64",
 	NULL
 };
