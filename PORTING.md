@@ -44,8 +44,8 @@ ships no such file at all. No amount of libc bridging carries a file that does
 not exist. The repair is `src/gl-fwd.c`: an object built with the SONAME of the
 library it replaces, preloaded so `ld.so` binds the application's `DT_NEEDED` to
 it, forwarding all 3470 entry points of the bundled `libGL.so.1` to whichever
-target the host can actually stand behind. Built a second time with a different
-table it is `egl-fwd.so`, and a third time it is `gles-fwd.so` -- 358 entry
+target the host can actually stand behind. The same source file built with a
+different table is `egl-fwd.so`, and built with a third it is `gles-fwd.so` -- 358 entry
 points of `libGLESv2.so.2`, which is the dispatcher a real GTK4 application
 actually renders through.
 

@@ -32,14 +32,25 @@
  * replaced by tools/gen_gl_fwd.py, and `make gl-syms-check` fails the build if
  * the checked-in table drifts from it.
  *
- * WHY TRAMPOLINES AND NOT WRAPPERS. Each entry point is a two-instruction tail
- * jump through a table slot, not a C function with a hand-written prototype.
- * A tail jump preserves every argument register, the return value and the
- * varargs count in %al, so it forwards ANY signature correctly -- including the
- * ones nobody typed out. A hand-written prototype that disagrees with the real
- * one corrupts arguments silently, and with 3470 entry points that class of bug
- * is not worth carrying. The cost is that a trampoline forwards a CALL:
- * exported data objects cannot be forwarded, and the generator says so.
+ * WHY TRAMPOLINES AND NOT WRAPPERS. Each entry point is a tail jump through a
+ * table slot, not a C function with a hand-written prototype. A tail jump
+ * preserves every argument register, the return value and the varargs count in
+ * %al, so it forwards ANY signature correctly -- including the ones nobody
+ * typed out. A hand-written prototype that disagrees with the real one corrupts
+ * arguments silently, and with 3470 entry points that class of bug is not worth
+ * carrying. The cost is that a trampoline forwards a CALL: exported data
+ * objects cannot be forwarded, and the generator says so.
+ *
+ * Ahead of the jump each trampoline loads its own index into a scratch
+ * register, which is what lets an UNRESOLVED slot reach code that knows which
+ * entry point was called. See the block above glfwd_resolve_asm below; it is
+ * the reason the host stack loads on first use rather than in a constructor,
+ * and the reason an entry point the host cannot provide is a line rather than
+ * a silent zero.
+ *
+ * THE SAME SOURCE FILE IS BUILT THREE TIMES -- gl-fwd.so, egl-fwd.so and
+ * gles-fwd.so -- differing only in the generated table and the vendor marker
+ * its dispatcher looks for. See src/Makefile.
  */
 
 #ifndef _GNU_SOURCE
