@@ -13,7 +13,7 @@ cp /repo/tools/* /build/tools/ 2>/dev/null || true
 cp /repo/elfsym.py /build/ 2>/dev/null || true
 make 2>&1 | tail -3
 mkdir -p /w/build
-cp foreign-dlopen.so runtime-select gl-fwd.so egl-fwd.so /w/build/
+cp foreign-dlopen.so runtime-select gl-fwd.so egl-fwd.so gles-fwd.so /w/build/
 for t in icd-harness vkprobe corpus invariants soak cudaprobe bindprobe; do
     gcc -O2 -o /w/build/$t /repo/tests/$t.c -ldl
 done

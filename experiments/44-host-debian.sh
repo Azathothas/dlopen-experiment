@@ -14,5 +14,6 @@ apt-get install -y -qq --no-install-recommends \
     mesa-vulkan-drivers libvulkan1 vulkan-tools mesa-utils \
     libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libegl1 \
     python3 procps \
+    gcc libc6-dev libgl-dev libegl-dev libx11-dev \
     xvfb xauth >/dev/null 2>&1
 exec sh /scripts/40-appimage.sh

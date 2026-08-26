@@ -61,6 +61,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* The one /etc/ld.so.conf walk, shared with src/gl-fwd.c. */
+#include "ld-conf.h"
+
 #define RS_MAX_VERSIONS 512
 #define RS_MAX_PATH     PATH_MAX
 
@@ -923,138 +926,46 @@ static int rs_path_append(char *s, size_t cap, size_t *n, const char *dir) {
 
 /* Every directory the DISTRO itself considers a library directory.
  *
- * The hardcoded list below covers the conventional places. It does not cover
- * the unconventional ones, and E44 is what that costs: WSL puts the GPU vendor
- * userspace in /usr/lib/wsl/lib and makes it reachable ONLY by writing
+ * The hardcoded list elsewhere covers the conventional places. It does not
+ * cover the unconventional ones, and E44 is what that costs: WSL puts the GPU
+ * vendor userspace in /usr/lib/wsl/lib and makes it reachable ONLY by writing
  * /etc/ld.so.conf.d/ld.wsl.conf. Under a loader with the cache inhibited (E13b)
  * that directory does not exist as far as the process is concerned, NVIDIA's
  * libcuda.so.1 cannot dlopen its own libdxcore.so, and CUDA reports no device
  * at all -- a symptom that reads as "no GPU", not as a missing library.
  *
- * ld.so.conf is PLAIN TEXT, so reading it gets the benefit of the cache without
- * touching the binary cache whose parsing is the reason the cache was inhibited
- * in the first place. This is the same computation as host_library_dirs() in
- * patches/sharun-library-path.patch; the two are needed independently because
- * sharun assembles the path for the bundled runtime and this assembles it for
- * the switched one.
- *
- * Bounded twice over. Depth alone is not enough: four levels of thirty-two
- * include globs is a million file opens, and a launcher that can be made to sit
- * in a loop by the contents of /etc is a worse failure than the one it fixes.
- * rs_conf_budget is the total number of conf files any one walk may read.
+ * The walk itself lives in ld-conf.h, because src/gl-fwd.c needs the same
+ * answer for a different reason and a second parser is how the two would
+ * drift. What stays here is the part that is about THIS caller: appending to a
+ * bounded --library-path, and this file's own logger.
  */
-static int rs_conf_budget;
-static int rs_conf_budget_warned;
+struct rs_conf_ctx {
+	char  *s;
+	size_t cap;
+	size_t *n;
+};
 
-static void rs_conf_dirs(const char *path, char *s, size_t cap, size_t *n,
-                         int depth) {
-	if (depth > 4)
-		return;
-	if (rs_conf_budget <= 0) {
-		if (!rs_conf_budget_warned) {
-			rs_conf_budget_warned = 1;
-			rs_log("ld.so.conf walk hit its file budget; the rest are ignored\n");
-		}
-		return;
-	}
-	rs_conf_budget--;
-	FILE *f = fopen(path, "r");
-	if (!f)
-		return;
-	char line[RS_MAX_PATH];
-	while (fgets(line, sizeof line, f)) {
-		char *h = strchr(line, '#');
-		if (h)
-			*h = '\0';
-		char *t = line + strlen(line);
-		while (t > line && (t[-1] == '\n' || t[-1] == '\r' || t[-1] == ' ' ||
-		                    t[-1] == '\t'))
-			*--t = '\0';
-		char *v = line;
-		while (*v == ' ' || *v == '\t')
-			v++;
-		if (!*v)
-			continue;
-		if (!strncmp(v, "include", 7) && (v[7] == ' ' || v[7] == '\t')) {
-			char *pat = v + 8;
-			while (*pat == ' ' || *pat == '\t')
-				pat++;
-			if (!*pat)
-				continue;
-			/* Only the trailing-glob form -- a directory, a slash, then a
-			 * star and a suffix -- occurs in practice. Expand it by hand
-			 * rather than pulling in glob(), which would make this depend on
-			 * a libc call in the middle of deciding which libc to use. */
-			char dir[RS_MAX_PATH], suffix[64];
-			char *slash = strrchr(pat, '/');
-			if (!slash)
-				continue;
-			size_t dlen = (size_t)(slash - pat);
-			if (dlen >= sizeof dir)
-				continue;
-			memcpy(dir, pat, dlen);
-			dir[dlen] = '\0';
-			const char *base = slash + 1;
-			const char *star = strchr(base, '*');
-			const char *want = star ? star + 1 : base;
-			/* A truncated suffix would match the wrong files rather than
-			 * none, which is the silent-wrong-answer shape this file exists
-			 * to avoid. Skip the include instead and say so. */
-			if (strlen(want) >= sizeof suffix) {
-				rs_log("include pattern suffix too long, skipped: %s\n", pat);
-				continue;
-			}
-			snprintf(suffix, sizeof suffix, "%s", want);
-			DIR *d = opendir(dir);
-			if (!d)
-				continue;
-			/* readdir order is whatever the filesystem feels like, and the
-			 * order of the conf files decides the order of the directories
-			 * they name. Collect and sort, so the same machine assembles the
-			 * same --library-path twice running: a result that is not
-			 * reproducible is not a result. */
-			char names[32][128];
-			const size_t maxn = sizeof names / sizeof names[0];
-			size_t cnt = 0;
-			struct dirent *e;
-			while ((e = readdir(d))) {
-				if (e->d_name[0] == '.')
-					continue;
-				size_t nl = strlen(e->d_name), sl = strlen(suffix);
-				if (sl && (nl < sl || strcmp(e->d_name + nl - sl, suffix)))
-					continue;
-				if (nl >= sizeof names[0]) {
-					rs_log("conf name too long, skipped: %s\n", e->d_name);
-					continue;
-				}
-				if (cnt == maxn) {
-					/* Never drop one silently: an incomplete path is the whole
-					 * failure this function exists to prevent. */
-					rs_log("more than %zu conf files in %s; the rest are ignored\n",
-					       maxn, dir);
-					break;
-				}
-				size_t j = cnt++;
-				while (j > 0 && strcmp(names[j - 1], e->d_name) > 0) {
-					memcpy(names[j], names[j - 1], sizeof names[0]);
-					j--;
-				}
-				memcpy(names[j], e->d_name, nl + 1);
-			}
-			closedir(d);
-			for (size_t k = 0; k < cnt; k++) {
-				char sub[RS_MAX_PATH];
-				if (snprintf(sub, sizeof sub, "%s/%s", dir, names[k]) >=
-				    (int)sizeof sub)
-					continue;
-				rs_conf_dirs(sub, s, cap, n, depth + 1);
-			}
-		} else if (*v == '/') {
-			if (!rs_path_append(s, cap, n, v))
-				rs_log("library-path is full; %s omitted\n", v);
-		}
-	}
-	fclose(f);
+static int rs_conf_add(const char *dir, void *ctx) {
+	struct rs_conf_ctx *c = ctx;
+	if (!rs_path_append(c->s, c->cap, c->n, dir))
+		rs_log("library-path is full; %s omitted\n", dir);
+	return 0;                       /* never stop: we want every directory */
+}
+
+static void rs_conf_warn(void *ctx, const char *what, const char *detail) {
+	(void)ctx;
+	if (detail)
+		rs_log("%s: %s\n", what, detail);
+	else
+		rs_log("%s\n", what);
+}
+
+static void rs_conf_dirs(const char *path, char *s, size_t cap, size_t *n) {
+	struct rs_conf_ctx c;
+	c.s = s;
+	c.cap = cap;
+	c.n = n;
+	ldconf_each_dir(path, rs_conf_add, rs_conf_warn, &c);
 }
 
 static char *rs_library_path(const struct rs_plan *p, const char *appdir,
@@ -1076,9 +987,9 @@ static char *rs_library_path(const struct rs_plan *p, const char *appdir,
 	for (size_t i = 0; rs_host_libdirs[i]; i++)
 		if (!rs_path_append(s, cap, &n, rs_host_libdirs[i]))
 			rs_log("library-path is full; %s omitted\n", rs_host_libdirs[i]);
-	rs_conf_budget = 256;
-	rs_conf_budget_warned = 0;
-	rs_conf_dirs("/etc/ld.so.conf", s, cap, &n, 0);
+	/* The budget and its one-shot warning are per-walk state inside
+	 * ldconf_each_dir now, so there is nothing to reset here. */
+	rs_conf_dirs("/etc/ld.so.conf", s, cap, &n);
 	return s;
 }
 

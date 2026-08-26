@@ -56,6 +56,9 @@
 #include <string.h>
 #include <unistd.h>
 
+/* The one /etc/ld.so.conf walk, shared with src/runtime-select.c. */
+#include "ld-conf.h"
+
 #ifndef GLFWD_TABLE
 #error "build with -DGLFWD_TABLE=... naming a generated table (see src/Makefile)"
 #endif
@@ -105,8 +108,15 @@ static int glfwd_debug(void) {
 	return v && strcmp(v, "1") == 0;
 }
 
+/* Trace implies debug: a trace with the logger switched off prints nothing,
+ * which is a confusing way to answer a question somebody asked for. */
+static int glfwd_trace(void) {
+	const char *v = getenv("ANYLINUX_GL_FWD_TRACE");
+	return v && strcmp(v, "1") == 0;
+}
+
 static void glfwd_log(const char *fmt, ...) {
-	if (!glfwd_debug())
+	if (!glfwd_debug() && !glfwd_trace())
 		return;
 	va_list ap;
 	va_start(ap, fmt);
@@ -352,22 +362,50 @@ static const char *const glfwd_names[GLFWD_COUNT] = {
 /*
  * This is a SINGLE-SONAME lookup, not a library search. ld.so cannot answer it
  * -- the name is taken by this object -- so it is answered here, for exactly
- * one name, over the conventional host library directories plus whatever
- * ANYLINUX_GL_HOST_DIR names. Nothing here ever opens a library it was not
- * handed by name, which is the rule foreign-dlopen.c keeps.
+ * one name. Nothing here ever opens a library it was not handed by name, which
+ * is the rule foreign-dlopen.c keeps.
  *
- * /usr/lib/<triplet>/mesa and /usr/lib/mesa are on the list because a Debian or
- * Ubuntu host with the alternatives layout keeps classic Mesa's libGL there and
- * glvnd's in the parent directory.
+ * WHERE IT LOOKS, IN ORDER, AND WHY THE ORDER CHANGED.
+ *
+ *   1. ANYLINUX_GL_HOST_DIR. The explicit handoff. A launcher that has already
+ *      assembled the host library path -- sharun does, from the ld.so cache --
+ *      can hand it straight here and nothing below is consulted for the answer
+ *      it gives.
+ *   2. every directory /etc/ld.so.conf and its includes name (ld-conf.h).
+ *      THE HOST'S OWN ANSWER, and the repair for a defect reported from
+ *      outside in Azathothas/dlopen-experiment#4: classic libGL.so.1 lives in
+ *      <triplet>/mesa on Ubuntu's alternatives layout and classic libEGL.so.1
+ *      in <triplet>/mesa-egl, the hardcoded list below had the first and not
+ *      the second, and EGL therefore failed on every pre-glvnd Ubuntu while GL
+ *      worked. That is not a missing entry, it is what a hardcoded guess about
+ *      somebody else's packaging is FOR: it drifts, silently, and only on the
+ *      hosts nobody has. The host writes the answer down in
+ *      /etc/ld.so.conf.d/x86_64-linux-gnu_EGL.conf; reading it is the fix.
+ *   3. the conventional directories, below. Still needed, and not a fallback
+ *      in name only: musl distros have no /etc/ld.so.conf at all -- Alpine
+ *      uses /etc/ld-musl-<arch>.path -- so on the very host class this shim
+ *      exists for, list 3 is the only one of the three that answers.
+ *
+ * PR #4's mesa-egl entries are kept in list 3 for the same reason: a host with
+ * the alternatives layout and no readable ld.so.conf is not hypothetical, and
+ * an access() that misses costs nothing.
  */
 static const char *const glfwd_host_dirs[] = {
 	"/usr/lib/" GLFWD_TRIPLET, "/lib/" GLFWD_TRIPLET,
-	"/usr/lib/" GLFWD_TRIPLET "/mesa",
-	"/usr/lib64", "/lib64", "/usr/lib64/mesa",
-	"/usr/lib", "/lib", "/usr/lib/mesa",
+	"/usr/lib/" GLFWD_TRIPLET "/mesa", "/usr/lib/" GLFWD_TRIPLET "/mesa-egl",
+	"/usr/lib64", "/lib64", "/usr/lib64/mesa", "/usr/lib64/mesa-egl",
+	"/usr/lib", "/lib", "/usr/lib/mesa", "/usr/lib/mesa-egl",
 	"/usr/local/lib", "/usr/local/lib64",
 	NULL
 };
+
+/* ld-conf.h hands warnings back as two fixed strings so it can stay ignorant
+ * of any caller's logger. */
+static void glfwd_conf_warn(void *ctx, const char *what, const char *detail) {
+	(void)ctx;
+	glfwd_log("/etc/ld.so.conf: %s%s%s\n", what, detail ? ": " : "",
+	          detail ? detail : "");
+}
 
 /* Call fn(dir) for every candidate directory until it returns non-zero. */
 static int glfwd_each_dir(int (*fn)(const char *dir, void *ctx), void *ctx) {
@@ -384,6 +422,8 @@ static int glfwd_each_dir(int (*fn)(const char *dir, void *ctx), void *ctx) {
 			free(copy);
 		}
 	}
+	if (ldconf_each_dir("/etc/ld.so.conf", fn, glfwd_conf_warn, ctx))
+		return 1;
 	for (size_t i = 0; glfwd_host_dirs[i]; i++)
 		if (fn(glfwd_host_dirs[i], ctx))
 			return 1;
@@ -420,23 +460,69 @@ static int glfwd_try_vendor(const char *dir, void *ctx) {
 	return found;
 }
 
-/* Does the host carry a plugin the BUNDLED dispatcher could still use? */
-static int glfwd_host_has_vendor(void) {
-	const char *vdir = GLFWD_VENDOR_DIR;
-	if (vdir) {
-		DIR *d = opendir(vdir);
+/* Is there anything in this directory the bundled dispatcher could dispatch to?
+ * Two markers, because the two dispatchers look for different things: GL wants
+ * a libGLX_<vendor>.so.0, EGL and GLES want a JSON file in a vendor directory. */
+static int glfwd_vendor_in(const char *libdir, const char *vendordir) {
+	if (vendordir) {
+		DIR *d = opendir(vendordir);
 		if (d) {
 			struct dirent *de;
 			while ((de = readdir(d)) != NULL) {
 				if (de->d_name[0] == '.')
 					continue;
-				glfwd_log("vendor found: %s/%s\n", vdir, de->d_name);
+				glfwd_log("vendor found: %s/%s\n", vendordir, de->d_name);
 				closedir(d);
 				return 1;
 			}
 			closedir(d);
 		}
 	}
+	return libdir ? glfwd_try_vendor(libdir, NULL) : 0;
+}
+
+/*
+ * Does the BUNDLE carry its own vendor library?
+ *
+ * ⚠ THIS QUESTION WAS MISSING, and a real application is what found it. The
+ * check used to ask only about the HOST, which is right for an AppImage built
+ * to use host drivers -- it bundles a dispatcher and no vendor, so if the host
+ * has no vendor either there is nothing to dispatch to and the host's own
+ * libGL is the only way forward. It is wrong for a SELF-CONTAINED AppImage,
+ * which bundles its whole Mesa: gtk4-demo ships libEGL_mesa.so.0 and 271 other
+ * libraries, the host-only check saw musl Alpine's empty vendor directory,
+ * concluded "no vendor anywhere", and forwarded a bundled GTK4 onto Alpine's
+ * Mesa. Two Mesas, one process, SIGFPE. With no shim in .preload the same
+ * AppImage runs fine, which is what made it a shim bug rather than a host one.
+ *
+ * The bundle wins when it has one: it is the stack the AppImage was built and
+ * tested against, and preferring it is also what makes this shim safe to put
+ * in EVERY AppImage's .preload rather than only in the host-drivers ones.
+ */
+static int glfwd_bundle_has_vendor(void) {
+	const char *appdir = getenv("APPDIR");
+	if (!appdir || !*appdir)
+		return 0;
+	char libdir[PATH_MAX], vdir[PATH_MAX];
+	snprintf(libdir, sizeof libdir, "%s/lib", appdir);
+	const char *hostv = GLFWD_VENDOR_DIR;
+	if (hostv) {
+		/* The bundled counterpart of the host's vendor directory: the same
+		 * path with the AppDir's prefix in front of it, which is where sharun
+		 * puts it. "/usr/share/..." -> "<appdir>/share/...". */
+		const char *rel = hostv;
+		if (strncmp(rel, "/usr/", 5) == 0)
+			rel += 4;
+		snprintf(vdir, sizeof vdir, "%s%s", appdir, rel);
+	}
+	return glfwd_vendor_in(libdir, hostv ? vdir : NULL);
+}
+
+/* Does the host carry a plugin the BUNDLED dispatcher could still use? */
+static int glfwd_host_has_vendor(void) {
+	const char *vdir = GLFWD_VENDOR_DIR;
+	if (vdir && glfwd_vendor_in(NULL, vdir))
+		return 1;
 	return glfwd_each_dir(glfwd_try_vendor, NULL);
 }
 
@@ -470,14 +556,29 @@ static void *glfwd_open_target(const char **how) {
 		have_bundled = access(bundled, R_OK) == 0;
 	}
 
-	int use_bundled = force_bundled ||
-	                  (!force_host && have_bundled && glfwd_host_has_vendor());
+	/* The bundle's own vendor is asked about FIRST and separately, because the
+	 * two answers mean different things: "the bundle can stand on its own" is
+	 * a reason to leave it alone, while "the host has a vendor" is only a
+	 * reason to believe the bundled dispatcher will find something. */
+	int bundle_vendor = !force_host && have_bundled && glfwd_bundle_has_vendor();
+	int host_vendor   = !force_host && have_bundled && !bundle_vendor &&
+	                    glfwd_host_has_vendor();
+	int use_bundled = force_bundled || bundle_vendor || host_vendor;
 	if (use_bundled && have_bundled) {
 		/* RTLD_GLOBAL so the dispatcher's whole export table reaches the global
 		 * scope: the entry points this shim does not own must still resolve. */
 		void *h = dlopen(bundled, RTLD_LAZY | RTLD_GLOBAL | RTLD_NODELETE);
 		if (h) {
-			*how = "bundled dispatcher (the host has a vendor library)";
+			/* Which of the two reasons, because they are not the same claim:
+			 * one says the AppImage is self-contained, the other says the host
+			 * can serve it. Reporting both as "the host has a vendor library"
+			 * is how a self-contained AppImage looked like a host one. */
+			*how = bundle_vendor
+			           ? "bundled dispatcher (the BUNDLE has its own vendor "
+			             "library; the AppImage is self-contained)"
+			       : host_vendor
+			           ? "bundled dispatcher (the host has a vendor library)"
+			           : "bundled dispatcher (forced)";
 			glfwd_log("target %s -- %s\n", bundled, *how);
 			return h;
 		}
@@ -714,6 +815,15 @@ void *glfwd_resolve_one(int index) {
 	void *p = glfwd_addr ? glfwd_addr[index] : NULL;
 	if (p) {
 		__atomic_fetch_add(&glfwd_called_fwd, 1, __ATOMIC_RELAXED);
+		/* One line per entry point the first time it is called. Separate from
+		 * ANYLINUX_LIB_DEBUG because it is a different question -- not "what
+		 * did the shim do" but "what does this application USE" -- and because
+		 * the exit summary cannot answer it for the many GL programs that never
+		 * exit: a window stays open, the harness sends SIGTERM, and SIGTERM
+		 * does not run destructors. This is the only form of the count that
+		 * survives a program being killed. */
+		if (glfwd_trace())
+			glfwd_log("first call: %s\n", glfwd_names[index]);
 	} else {
 		__atomic_fetch_add(&glfwd_called_absent, 1, __ATOMIC_RELAXED);
 		/* B1. THE POINT OF ALL OF THIS. Before this existed an entry point the
@@ -759,7 +869,7 @@ static void glfwd_init(void) {
 
 __attribute__((destructor))
 static void glfwd_report(void) {
-	if (!glfwd_debug())
+	if (!glfwd_debug() && !glfwd_trace())
 		return;
 	if (__atomic_load_n(&glfwd_load_state, __ATOMIC_ACQUIRE) != 2) {
 		glfwd_log("%s: not one entry point was called in this process\n",

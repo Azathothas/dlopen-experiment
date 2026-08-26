@@ -367,12 +367,13 @@ in the row turned out to be wrong.
 |---|---|---|---|---|
 | **B1** | ✅ CLOSED | **1097 of 3470 entry points return zero and say nothing.** They forward to `glfwd_absent`. An application that links one gets a silent no-op, not a diagnostic | This is the difference between "works" and "works for the applications tried". A silent zero is the failure mode this repository spends the most words warning about, and the shim now has one by construction | Make the absent case observable without making it fatal: a one-line-per-name report at first call under `ANYLINUX_LIB_DEBUG=1`, which needs the register-saving resolver stub described in B2. Then measure which of the 1097 a real application actually touches -- likely zero, and "likely" is the problem |
 | **B2** | ✅ CLOSED | **The trampolines cannot report, because a table slot cannot run code.** The current design fills the table in a constructor and every slot is either a real address or a silent stub | It also forces the eager load in B4 and blocks per-symbol laziness | Write the x86-64 register-saving resolver: save `rdi rsi rdx rcx r8 r9 xmm0-7 rax`, call a C resolver with the index, restore, tail-jump. This is `_dl_runtime_resolve` minus the bookkeeping, ~60 lines, and it is the single change that unlocks B1 and B4 |
-| **B3** | ⬜ open | **Only ONE non-glvnd host family has been tested: musl Alpine.** The other half of the claim -- pre-glvnd **glibc** distros, Ubuntu 14.04/16.04, Debian 8 -- is asserted, not measured, here | The README and REPORT 9 both say "every musl distro, and every pre-glvnd glibc distro". Half of that sentence has evidence | `ubuntu:14.04` and `ubuntu:16.04` still exist on Docker Hub; their apt repositories moved to `old-releases.ubuntu.com`, which is a `sources.list` rewrite, not a blocker. Add them as a third and fourth host to `appimage.ps1` and run E59-E68 there. Mesa 10.1 is also the one stack where the `_glapi_tls_Dispatch` case in REPORT 9.5 might reproduce, which would close a second open question at the same time |
+| **B3** | ✅ CLOSED | **Only ONE non-glvnd host family has been tested: musl Alpine.** The other half of the claim -- pre-glvnd **glibc** distros, Ubuntu 14.04/16.04, Debian 8 -- is asserted, not measured, here | The README and REPORT 9 both say "every musl distro, and every pre-glvnd glibc distro". Half of that sentence has evidence | `ubuntu:14.04` and `ubuntu:16.04` still exist on Docker Hub; their apt repositories moved to `old-releases.ubuntu.com`, which is a `sources.list` rewrite, not a blocker. Add them as a third and fourth host to `appimage.ps1` and run E59-E68 there. Mesa 10.1 is also the one stack where the `_glapi_tls_Dispatch` case in REPORT 9.5 might reproduce, which would close a second open question at the same time |
 | **B4** | ✅ CLOSED | **The shims load the host GL stack in every process, GL or not.** Measured cost: +30 ms and +30 MB on a Vulkan-only run | Small, but it is 30 MB of host Mesa mapped into a process that will never call it, and the reason it is not gated is that the gate was judged too dangerous to write. With B2 done it becomes trivial: nothing resolves until something calls | Gate on first call, via B2's resolver. Delete the constructor's `dlopen` entirely |
-| **B5** | ⬜ open | **No GLES shim.** `libGLESv2.so.2` and `libGLESv1_CM.so.1` are the same shape and are not covered | An AppImage bundling Mesa's GLES has the identical gap and would fail identically. The generator and the shim already do everything needed; this is a table and two `-D` flags | `make gl-syms` against a bundled `libGLESv2.so.2`, add the build rule, add an E-case. Note the demo AppDir bundles neither, so this needs an AppDir that does -- see B6 |
-| **B6** | ⬜ open | **Two applications, one of which I wrote.** `glxgears` (33 GL symbols) and `glprobe` (15). Nothing real | 3470 forwarded entry points have been exercised at a rate of about 1%. The claim "it replaces libGL" rests on the export count, not on use | Build a demo AppDir around something with a real GL surface. `pkgforge-dev/Anylinux-AppImages` `useful-tools/demo/` has recipes for gtk3/gtk4/qt6/sdl/webkit2gtk AppImages; any of those on Alpine is a far harder test than `glxgears` |
-| **B7** | ⬜ open | **Never on real silicon on the non-glvnd path.** Every GL result on Alpine is llvmpipe under Xvfb | The d3d12 path (E53) proves hardware GL works through the AppImage on a **glvnd** host. The classic-Mesa path has no hardware result at all | Alpine has no `d3d12_dri.so` (E53a's skip reason). Either build Mesa's d3d12 Gallium driver for Alpine, or accept this as hardware-blocked and say so in one sentence instead of leaving it implied |
-| **B8** | ⬜ open | **aarch64 trampolines assemble and have never run.** `make gl-fwd-asm-check` produces correct instructions and relocations and proves nothing else | The repository already carries this caveat for `RS_LDSO` and `RS_TRIPLET`; `gl-fwd` adds hand-written assembly to it, which is a larger thing to be unverified | Hardware, or a qemu-user run under `--platform linux/arm64`. The second is cheap and worth trying before declaring it blocked |
+| **B5** | ✅ CLOSED | **No GLES shim.** `libGLESv2.so.2` and `libGLESv1_CM.so.1` are the same shape and are not covered | An AppImage bundling Mesa's GLES has the identical gap and would fail identically. The generator and the shim already do everything needed; this is a table and two `-D` flags | `make gl-syms` against a bundled `libGLESv2.so.2`, add the build rule, add an E-case. Note the demo AppDir bundles neither, so this needs an AppDir that does -- see B6 |
+| **B6** | ✅ CLOSED | **Two applications, one of which I wrote.** `glxgears` (33 GL symbols) and `glprobe` (15). Nothing real | 3470 forwarded entry points have been exercised at a rate of about 1%. The claim "it replaces libGL" rests on the export count, not on use | Build a demo AppDir around something with a real GL surface. `pkgforge-dev/Anylinux-AppImages` `useful-tools/demo/` has recipes for gtk3/gtk4/qt6/sdl/webkit2gtk AppImages; any of those on Alpine is a far harder test than `glxgears` |
+| **B7** | ⛔ BLOCKED | **Never on real silicon on the non-glvnd path.** Every GL result on Alpine is llvmpipe under Xvfb | The d3d12 path (E53) proves hardware GL works through the AppImage on a **glvnd** host. The classic-Mesa path has no hardware result at all | Alpine has no `d3d12_dri.so` (E53a's skip reason). Either build Mesa's d3d12 Gallium driver for Alpine, or accept this as hardware-blocked and say so in one sentence instead of leaving it implied |
+| **B8** | ✅ CLOSED | **aarch64 trampolines assemble and have never run.** `make gl-fwd-asm-check` produces correct instructions and relocations and proves nothing else | The repository already carries this caveat for `RS_LDSO` and `RS_TRIPLET`; `gl-fwd` adds hand-written assembly to it, which is a larger thing to be unverified | Hardware, or a qemu-user run under `--platform linux/arm64`. The second is cheap and worth trying before declaring it blocked |
+| **B9** | ✅ CLOSED | **The shim guessed where the host keeps its libraries.** A hardcoded directory list had `<triplet>/mesa` and not `<triplet>/mesa-egl`, so EGL failed on every pre-glvnd Ubuntu while GL worked | Reported from outside ([PR #4](https://github.com/Azathothas/dlopen-experiment/pull/4)). Not a missing entry: a guess about somebody else's packaging, which had already drifted from the path sharun assembles | Derive the list from `/etc/ld.so.conf` instead, sharing one walk with `runtime-select.c`. See 4.0.1 |
 
 ⭐ **B2 is the keystone.** B1 and B4 both reduce to it, and it is the one piece
 of genuinely new machinery. B3 is the highest-value item that needs no new
@@ -477,6 +478,237 @@ row estimates. That number is reported and never thresholded -- it is a
 property of the application, and a bar here would be a bar on somebody else's
 program.
 
+#### B3 ✅ -- the other host class, measured, and one premise corrected
+
+⚠ **The row's route is wrong and would have stopped you.** It says these
+images' repositories "moved to `old-releases.ubuntu.com`, which is a
+`sources.list` rewrite, not a blocker". As of 2026-08 `old-releases` does not
+carry `trusty` or `xenial` **at all** -- its `dists/` listing jumps from
+`saucy` to `utopic` and every path 404s. Both releases are still inside their
+ESM window and are still served from **`archive.ubuntu.com` at the default
+path**, so the prescribed rewrite is the thing that breaks them. What does have
+to go is the image's own ESM source: it points at `esm.ubuntu.com`, needs
+credentials, and apt fails the whole update over it and then reports every
+package as "unable to locate", which reads exactly like a dead mirror.
+
+```sh
+rm -f /etc/apt/sources.list.d/*esm*      # and leave sources.list alone
+```
+
+`experiments/46-host-ubuntu.sh` is the third and fourth host; `appimage.ps1`
+runs all four by default and `-Only ubuntu1404` runs one.
+
+```
+ubuntu:14.04   glibc 2.19   Mesa 10.1.3   26/26, 19 named skips
+ubuntu:16.04   glibc 2.23   Mesa 18.0.5   26/26, 19 named skips
+```
+
+Both are classic: no `libGLX_<vendor>.so.0` anywhere. On 14.04 `glxgears`
+renders (`Gallium 0.4 on llvmpipe (LLVM 3.4)`), `glprobe` reads its pixel back,
+and `eglprobe` gets a context. **The pre-glvnd glibc half of the claim has
+evidence now.**
+
+⭐ **And the resolution counts match an independent run on hardware nobody here
+has.** [issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1)
+reported Ubuntu 14.04 from a seven-distro matrix on a real RX 580:
+
+```
+reported : libGL.so.1: 1889 of 3470 resolved (1405 exported, 484 via glXGetProcAddressARB, 1581 absent)
+measured : libGL.so.1: 1889 of 3470 resolved (1405 exported, 484 via glXGetProcAddressARB, 1581 absent)
+```
+
+Same numbers, different hardware, different display path, different Mesa point
+release. That is a prediction that held.
+
+**Two things the row hoped for did not happen, and one it did not expect did.**
+The `_glapi_tls_Dispatch` case in REPORT 9.5 did **not** reproduce on Mesa
+10.1: GL works there, and nothing needed the global scope to do it. What
+happened instead is on 16.04, and it is worth more -- see B3's second finding
+below.
+
+#### B3's second finding: the `ld.so.cache` blindness, fourth sighting
+
+Ubuntu 16.04 failed three cases, and the failure was not the shim. Its host
+`libGL.so.1` loads, the shim resolves 2354 of 3470 entry points from it, and
+then Mesa `dlopen`s its own `swrast_dri.so`, which needs `libLLVM-6.0.so.1` --
+reachable on that host **only** through `/etc/ld.so.cache`, which the bundled
+`ld.so` is patched not to read (E13b). What the user sees:
+
+```
+libGL error: unable to load driver: swrast_dri.so
+X Error of failed request:  BadValue
+  Major opcode of failed request:  151 (GLX)
+  Minor opcode of failed request:  3 (X_GLXCreateContext)
+```
+
+A display fault, apparently. It is the same bug as `CUDA_ERROR_NO_DEVICE`
+(E44) and `glXCreateContext failed` (E53a). **E77** now measures it on every
+host, and what it scores is the DIAGNOSTIC rather than the outcome -- the
+outcome is a property of how a host packages its driver, but "when this bites,
+the process names the library it could not find" is true everywhere.
+
+#### B3's third finding: predict what the HOST does, not what you hoped
+
+`eglprobe` failed on 16.04 with the shims. So it does **natively**, with no
+AppImage, no preload and no shim in the process:
+
+```
+native eglprobe on ubuntu:16.04    EGL_VERSION : 1.4   EGL_VENDOR : Mesa Project
+                                   readback rgba : 0 0 0 255 (want ~64 128 191 255)
+                                   FAILED: the pixel does not carry the colour that was set
+```
+
+Mesa 18.0.5 does not produce that pixel on that host at all. A shim that then
+produced it would be inventing one. ⛔ So **E78 and E79 build and run the
+probes natively and E64/E66 are predicted against THAT**, not against a
+constant: the shim's claim is transparency, so the yardstick is the host. This
+also corrects a hypothesis offered in the issue -- that 16.04's readback fails
+because the GL and EGL shims do not share dispatch state. There are no shims in
+the native run.
+
+#### B5 ✅ -- the GLES dispatcher, from an AppDir that has one
+
+`src/gl-fwd-gles2.h`, **358 entry points**, read out of the `libGLESv2.so.2`
+bundled by the gtk4 demo AppImage; `make gles-syms GLES=<dir>` regenerates and
+`make gles-syms-check` fails on drift. The row is right that it is "a table and
+two `-D` flags" -- and right that it needed an AppDir that bundles GLES, which
+is why it waited for B6.
+
+GLES finds its implementation the way EGL does, through
+`/usr/share/glvnd/egl_vendor.d`, so `gles-fwd.so` is the same source file with
+EGL's vendor marker and its own table.
+
+⭐ It is not a completeness exercise. **GTK4 renders through GLES**: E83
+measures gtk4-demo calling 46 distinct GLES entry points, 13 EGL and 1 GL. On a
+classic host without this shim, those 358 names are 358 silent zeros.
+
+`libGLESv1_CM.so.1` is **not** done, and not because it is hard: no AppImage
+available here bundles one, and the generator's rule is that the list comes out
+of the object being replaced. One `make gles-syms` against an AppDir that has
+one is the whole job.
+
+#### B6 ✅ -- a real application, and it found a bug
+
+`experiments/47-gtk4.sh`, a fifth stage: the gtk4-demo AppImage -- 272
+libraries, its own Mesa, its own `libEGL_mesa.so.0`, a real GTK4 application --
+on musl Alpine. This is the other SHAPE of AppImage, self-contained rather than
+host-drivers, and four synthetic cases and two host classes had never seen one.
+
+**It failed, and the shim was wrong.** `glfwd_host_has_vendor()` asked only
+whether the HOST had a vendor library. On Alpine it does not, so the shim
+forwarded a bundled GTK4 stack onto Alpine's Mesa: two Mesas in one process,
+`SIGFPE`. The same AppImage with no shim in `.preload` ran fine, which is what
+made it a shim bug and not a host one.
+
+The repair is `glfwd_bundle_has_vendor()`: if the BUNDLE carries its own vendor
+library, the bundled dispatcher is what the application was built and tested
+against and the shim leaves it alone. That is also what makes this shim safe to
+put in *every* AppImage's `.preload` rather than only in the host-drivers ones.
+
+```
+E80a  as shipped, no shims          rc=143  (still running when the timeout ended)
+E80   gl + egl + gles shims         rc=143  (was 136/SIGFPE)
+E81   target chosen                 the bundled dispatcher, because the BUNDLE
+                                    has its own vendor library
+E82   3470 of 3470, 44 of 44, 358 of 358 entry points resolved
+E83   gtk4-demo called 1 GL, 13 EGL and 46 GLES entry points
+```
+
+⭐ **E83 is the number the row is about.** "3470 forwarded entry points
+exercised at about 1%" was an estimate; the measured figures are `glprobe` at
+15 of 3470 (0.4%) and gtk4-demo at 46 GLES of 358 (13%) -- and the useful part
+is not the percentage, it is that **the application's renderer was GLES**, a
+dispatcher this repository did not cover until this AppDir arrived.
+
+#### B7 ⛔ -- hardware-blocked here, and the reason is structural
+
+The row asks for one sentence rather than an implication, so: **there is no
+host on this machine that is both classic-Mesa and able to reach a GPU, and
+that is not an accident of what is installed.** Measured, not assumed:
+
+```
+alpine:3.22  /usr/lib/dri: crocus i915 iris kms_swrast libdril nouveau r300
+             r600 radeonsi swrast virtio_gpu vmwgfx zink -- no d3d12_dri.so
+/usr/lib/wsl/lib: libcuda, libnvidia-*, libd3d12.so, libdxcore.so
+             -- no libGL, no libGLX_nvidia.so.0, no libEGL
+```
+
+The only GPU route here is Mesa's `d3d12` Gallium driver over `/dev/dxg`, which
+needs Mesa ≥ 21. Every glibc distro shipping Mesa ≥ 21 uses libglvnd, and the
+classic-Mesa holdouts are the musl distros, which do not build `d3d12`. The two
+properties are anti-correlated, so this is not "wait for a package".
+
+⭐ **It has been measured elsewhere, and that is recorded as elsewhere.**
+[issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1) reports
+`glprobe` passing on Alpine 3.21 with hardware `radeonsi` on an RX 580 -- GL on
+real silicon on the classic path. Not reproduced here, not adopted as if it
+were, and named the same way REPORT 9.5 names the Mesa 10.1 report it also
+could not reproduce.
+
+#### B8 ✅ -- the aarch64 trampolines have now run
+
+`make gl-fwd-qemu-check`, and **E76/E76b** in `run.ps1` section P. qemu-user
+runs an aarch64 binary on an x86_64 kernel in userspace, and everything under
+test is userspace: the trampoline, the resolver, ld.so binding a `DT_NEEDED` to
+a preloaded object with the same SONAME, and `dlopen`.
+
+```
+t_ints:
+    bti  c
+    mov  w17, #0x0
+    adrp x16, glfwd_tab
+    ldr  x16, [x16, #272]
+    br   x16
+
+E76   OK: first-call ints=204 floats=285.00 varargs=10 struct=[2..12]
+      second-call-identical=yes absent-returned=0
+E76b  ABSENT entry point called: t_absent
+```
+
+⚠ **Not the row's route.** `podman run --platform linux/arm64` replaces the
+cached image for that tag, and one probe left `alpine:3.22` resolving to arm64
+and killed the next suite run with `Exec format error`. Naming
+`qemu-aarch64-static` needs no binfmt registration -- a kernel-wide setting --
+and no privilege.
+
+Still UNVERIFIED: aarch64 **silicon**. qemu-user emulates the instructions, not
+a real memory model or a real Mesa.
+
+#### B9 ✅ -- a new item, from outside: the shim stops guessing where libraries are
+
+Not in the original eight. [PR #4](https://github.com/Azathothas/dlopen-experiment/pull/4)
+reported that `egl-fwd.so` cannot find the host's classic `libEGL.so.1` on
+Ubuntu's alternatives layout: `glfwd_host_dirs[]` listed `<triplet>/mesa`,
+where classic `libGL` lives, and not `<triplet>/mesa-egl`, where classic
+`libEGL` lives. EGL therefore failed on every pre-glvnd Ubuntu while GL worked.
+
+The PR's own follow-up made the better argument: a hardcoded list of somebody
+else's packaging conventions is a guess, it had already drifted from the path
+sharun assembles, and adding an entry treats the symptom. Section 7 says the
+same thing -- gl-fwd's list is "the one deliberate exception, and it is
+bounded... it must not grow into one".
+
+So the list is now **derived**. [`src/ld-conf.h`](src/ld-conf.h) is one walk of
+`/etc/ld.so.conf`, shared by `gl-fwd.c` and `runtime-select.c` so there is one
+parser rather than two, and the shim looks in this order:
+
+1. `ANYLINUX_GL_HOST_DIR` -- the explicit handoff a launcher can use
+2. every directory `/etc/ld.so.conf` and its includes name -- **the host's own
+   answer**, which on Ubuntu is `x86_64-linux-gnu_EGL.conf` naming `mesa-egl`
+3. the conventional list, which now includes PR #4's `mesa-egl` entries --
+   still needed, and not in name only: musl distros have no `/etc/ld.so.conf`
+   at all, so on the very host class this shim exists for, list 3 is the only
+   one that answers
+
+**E75/E75b** measure it on a directory no list could contain, so a pass cannot
+come from the hardcoded entries, and the control is the conf file's absence
+rather than a switch invented to disable the feature:
+
+```
+E75   target /opt/anylinux-unguessable-42/libtgt.so     conf file present
+E75b  no target; all 5 entry points return zero          conf file removed
+```
+
 ### 4.1 The blocker, now fixed
 
 `vkEnumeratePhysicalDevices` returned `VK_ERROR_OUT_OF_HOST_MEMORY` with zero
@@ -520,80 +752,83 @@ nothing on it is merely unwritten. If you find yourself with a machine that
 unblocks a row, that row is the work; if not, the honest thing is to verify what
 is here rather than add to it.
 
-⚠ Three rows that were on this list have moved to 4.0, because they turned out
-not to be blocked: aarch64 can at least be RUN under qemu-user (B8), the 1097
-absent GL entry points can be made observable (B1), and the `_glapi_` case has
-a host that would settle it (B3). They are named here only so nobody restores
-them.
+⚠ Three rows that were on this list moved to 4.0 and are now CLOSED, because
+they turned out not to be blocked: the aarch64 trampolines RUN under qemu-user
+(B8), the absent GL entry points are observable at the call (B1), and the
+`_glapi_` case had a host that settled it (B3 -- it did not reproduce on Mesa
+10.1). They are named here only so nobody restores them.
+
+⚠ **`B7` is on this list now**, having come the other way. Its closure record
+in 4.0.1 has the two `ls` commands that establish it and the reason it is
+structural rather than a packaging accident.
 
 | Item | Why it is not done | What would unblock it |
 |---|---|---|
 | **Vulkan on hardware** | Mesa's Vulkan-on-D3D12 driver (`dzn`) is `microsoft-experimental` and Debian does not package it, so every ICD result here is lavapipe. OpenGL *is* on hardware now (E53), through the `d3d12` **Gallium** driver, which Debian does package as `dri/d3d12_dri.so` | build Mesa with `-Dvulkan-drivers=microsoft-experimental`, then re-run the suite against that ICD. Watch for `libd3d12.so` being glibc-built: on Alpine the chain becomes musl-Mesa on a glibc D3D12 layer |
 | DRM-native drivers (`radv`, `anv`, `radeonsi`) | there is no `/dev/dri` anywhere on this machine. WSL2 publishes no DRM render nodes, so these three cannot initialise however much silicon is present | a non-WSL Linux host |
-| The unmeasured plugin boundaries | `libva`, `libvdpau`, `libasound`, `libpulse`, `libOpenCL` and `libgbm` are the same shape as the OpenGL one and this AppDir bundles none of them, so there is nothing here to measure. `tools/plugin_boundaries.py` classifies them on sight if one turns up. `libX11.so.6` IS bundled and its loadable-i18n boundary is unmeasured | an AppImage that bundles one of them -- which B6 in 4.0 would also produce |
-| No host implementation for 1097 of the GL entry points | a property of Alpine's Mesa 25.1, not of this repository: they are extensions glvnd knows the names of and that Mesa has no code for. Making the absent case OBSERVABLE is B1 in 4.0 and is not blocked; making Mesa implement them is not this project's work | nothing here. See B1 |
+| The unmeasured plugin boundaries | `libva`, `libvdpau`, `libasound`, `libpulse`, `libOpenCL` and `libgbm` are the same shape as the OpenGL one and this AppDir bundles none of them, so there is nothing here to measure. `tools/plugin_boundaries.py` classifies them on sight if one turns up. `libX11.so.6` IS bundled and its loadable-i18n boundary is unmeasured. ⚠ B6's gtk4 AppDir has 272 libraries and has NOT been run through `plugin_boundaries.py`; doing so is the cheapest way to find the next boundary and it is not blocked | an AppImage that bundles one of them. The gtk4 AppDir may already be one |
+| **Hardware GL on the CLASSIC-Mesa path (B7)** | there is no host on this machine that is both classic-Mesa and able to reach a GPU. The only GPU route here is Mesa's `d3d12` Gallium driver over `/dev/dxg`, which needs Mesa >= 21; every glibc distro at Mesa >= 21 uses libglvnd, and the classic holdouts are musl distros that do not build `d3d12`. Measured: Alpine 3.22 ships no `d3d12_dri.so`, and `/usr/lib/wsl/lib` ships no GL, GLX or EGL at all | a machine with a DRM render node and a classic-Mesa distro. Reported working on an RX 580 from outside ([issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1)), not reproduced here |
+| **Ubuntu 12.04's EGL (B10)** | Mesa 8.0.4 ships EGL 1.4 and, per the same outside report, `eglInitialize` fails there even with the right directory. Not measured here -- 12.04 is on `old-releases` and was not added as a host -- and it is the host's Mesa either way: 16.04's EGL fails the same probe NATIVELY, with no AppImage in the process (E79) | nothing in this repository. An AppImage cannot give a host an EGL implementation it does not have |
+| No host implementation for 1097 of the GL entry points | a property of Alpine's Mesa 25.1, not of this repository: they are extensions glvnd knows the names of and that Mesa has no code for. Making the absent case OBSERVABLE was B1 and is DONE -- a call to one is a line naming it, and `glprobe` reaches zero of the 1097 (4.0.1). Making Mesa implement them is not this project's work | nothing here. See B1 |
 | The two live ABI hazards | `regoff_t` is 4 bytes on glibc and 8 on musl, and the `FTW_*` values are off by one, so a musl-built object reads a glibc-filled `regmatch_t[]` or classifies an `nftw` entry wrongly (E50). An offset compiled into an object is not reachable from a preload | nothing in this repository. It is a property of the two libcs, and the useful output is the list of two, which E50 keeps honest |
 | Three residual library-path gaps upstream | the sharun fix is **upstreamed** ([Anylinux-sharun@`54208d2`](https://github.com/pkgforge-dev/Anylinux-sharun/commit/54208d2bc7d4c919ba46a6c234f6af7f8426b537)) and the patch here is deleted. What that change does not reach is musl's `/etc/ld-musl-<arch>.path`, multiarch triplets past three, and the non-FHS prefixes; `analysis/ground-truth.md` has the measurement | a different repository, and section 8 forbids writing there |
 
 ### 4.3 What the last session closed, so you do not redo it
 
-The previous handover said the experiment was closed. It was not, and the way it
-was wrong is the most useful thing to carry forward -- section 5.0 is about
-that. What this session actually closed:
+⭐ **Section 4.0 is closed except B7, which is hardware-blocked and says so in
+one sentence.** Every closure is written under the item it closes, in 4.0.1,
+with the command that proves it and the output it produced. What follows is the
+shape of the session, not a substitute for reading those.
 
-- **OpenGL and EGL work on a classic-Mesa host**, which is every musl distro.
-  The gap and the mechanism came from PR #2, opened from outside; what is here
-  differs from that patch in five measured ways and exists because of it.
-  [`src/gl-fwd.c`](src/gl-fwd.c) replaces the bundled libglvnd dispatcher rather
-  than trying to supply the vendor library it cannot find. `glxgears` renders on
-  Alpine (E61, E62), `glprobe` clears a pixel and reads the same colour back
-  (E63, E64), `eglprobe` gets a surfaceless context (E65, E66), and `vkcube` is
-  unaffected (E67). On a glvnd host all four are unchanged, which is the other
-  half of the claim and the reason both host classes are measured.
-- **The forwarding table is generated and gated.** 3470 entry points read out of
-  the bundled `libGL.so.1` by `tools/gen_gl_fwd.py`; `make gl-syms-check` and
-  E60 fail if the table and the bundle ever disagree. Do not hand-edit
-  `src/gl-fwd-gl.h`; a hand-written subset is not a smaller version of this, it
-  is the version that renders `glxgears` and dies on `glGetIntegerv`.
-- **Three loader mechanisms are now measured rather than assumed**, each in
-  objects small enough that the mechanism is the only thing under test:
-  `RTLD_LOCAL` hides a loader's closure from a plugin's undeclared import
-  (E54/E55), preload constructors run in REVERSE of the `.preload` order
-  (E56/E57), and a tail-jump trampoline forwards any signature (E58).
-- **Every bundled loader is classified.** `tools/plugin_boundaries.py` reads the
-  AppDir for objects that import `dlopen`; E59 fails the suite on one nobody has
-  looked at. It found `libdecor-0.so.0`, which nobody had.
-- **The sharun library-path fix is upstream** and the patch here is deleted; the
-  three things upstream does not reach are in `analysis/ground-truth.md`.
+**The keystone was one instruction.** A table slot is an address, so nothing
+could happen AT a call; the repair is that each trampoline now carries its own
+index in a register the ABI already lets a call destroy (`%r11`, `x17`), and an
+unresolved slot points at a register-saving resolver where that index is the
+whole message. B1, B4 and the two counters that answer B6 all reduce to it, and
+it is about sixty lines of assembly.
 
-And from the session before, still true:
+**Three of the eight items were answered by measuring rather than by building.**
+B3 needed two container images and a corrected premise. B7 needed two `ls`
+commands and the honesty to say the two properties are anti-correlated. B8
+needed `qemu-aarch64-static` instead of the `--platform` flag the row suggested.
 
-- **A proprietary driver is the least likely host library to need this fix.**
-  NVIDIA ships `libcuda.so.1` against a `GLIBC_2.2.5` floor on purpose, so
-  nothing in it can be missing from a bundled glibc 2.44. E41 works, and so do
-  E41b with the feature off, E41c with no preload in the process at all, and
-  E43a with upstream's shim. E42 rewrites zero objects. What those cases
-  support is the *regression* claim, and REPORT.md 7.1 says so rather than
-  dressing it up.
-- **What the vendor stack did need was uniform version binding.** Microsoft's
-  `libdxcore.so`, which `libcuda.so.1` loads to reach `/dev/dxg`, carries no
-  symbol versioning at all, so as shipped the CUDA stack runs two different
-  `pthread_cond_*` implementations in one process (E43a). This repo's preload
-  makes them one (E43). `libd3d12.so` is the same shape in the graphics stack.
-  Latent, not currently fatal, and REPORT.md 7.2 states the limit of the claim.
-- **The `/etc/ld.so.cache` blindness has a symptom now, three times over**, and
-  none of the three names a missing library: `CUDA_ERROR_NO_DEVICE` (E44),
-  `glXCreateContext failed` (E53a), and `CUDA_ERROR_OPERATING_SYSTEM` from a
-  switched host runtime, measured against the commit before the fix.
-  `runtime-select.c` now derives its directories from `/etc/ld.so.conf`; sharun
-  still needs the patch.
-- **T1.3-T1.7 are written and passing**, and the size-versus-offset distinction
-  is what made them useful rather than alarming. Two of the six struct hazards
-  are measured live, two measured benign, and two (`ucontext_t`, `O_LARGEFILE`)
-  argued rather than measured, because nothing in the closure crosses them.
-  REPORT.md 7.4 keeps that labelled; do not let it quietly become "six checked".
-- **Design R has run a real GPU workload** (E51, E52), with the switch forced,
-  because auto correctly declines on a host older than the bundle.
+**The two most valuable results came from things that had never been run.**
+
+- **A real application found a real bug.** gtk4-demo -- 272 bundled libraries,
+  its own Mesa -- died with SIGFPE under the shims and ran fine without them,
+  because `glfwd_host_has_vendor()` asked only about the host and hijacked a
+  self-contained AppImage onto Alpine's Mesa. Four synthetic cases and two host
+  classes had never seen an AppImage of that shape. B6.
+- **A native control settled an attribution that both a maintainer and I had
+  got wrong.** `eglprobe` fails on Ubuntu 16.04 with the shims -- and natively,
+  with no AppImage in the process at all. E64 and E66 are now predicted against
+  what the host does rather than against a constant, because the shim's claim
+  is transparency and the yardstick for transparency is the host.
+
+**Two items came from outside and are not in the original eight.** B9 is a
+defect reported in a PR, and the PR's own follow-up made the better argument:
+the shim's hardcoded directory list was a guess about somebody else's
+packaging, it had drifted, and the repair is to read `/etc/ld.so.conf` --
+which `runtime-select.c` already did, so the two now share one walk
+([`src/ld-conf.h`](src/ld-conf.h)). B10 is a host limitation to record rather
+than patch, and it is in 4.2.
+
+**One harness lesson is worth more than any of the code.** Sections 5's new
+entries are all from this session and all the same shape: a measurement that
+changed something it was not supposed to change. Hand-debugging left the shims
+in the shared `.tmp/AppDir` and the next full run reported hardware failures
+that were not happening. An aarch64 probe replaced a cached image and the suite
+died on `Exec format error`. Adding the host's library directories to every GL
+case made `glxgears` render on Alpine **with no shim at all**, through the X
+server's own GLX -- which would have looked like a triumph and was the controls
+quietly ceasing to control anything.
+
+**What the next session should NOT redo:**
+
+- `old-releases.ubuntu.com` for 14.04/16.04. They are on `archive.ubuntu.com`.
+- Adding `mesa-egl` to `glfwd_host_dirs[]`. The list is derived now.
+- Forcing `EGL_PLATFORM=surfaceless` and reading a Mesa 18 failure as a bug.
+- Looking for a classic-Mesa host with a GPU on this machine. There is none.
 
 ## 5. Things that will waste your time
 
@@ -689,6 +924,38 @@ of *does the AppImage work on this host*. Section 4 is written that way now.
   visible as a harness bug rather than a hang in the shim.
 
 ### About the test environment
+
+- **`.tmp/AppDir` is shared state, and debugging one host by hand poisons the
+  next full run.** Section J rewrites `.preload`; so does anyone reproducing a
+  case at the prompt. The next `appimage.ps1` then runs sections A through I
+  with GL shims those cases know nothing about, and what you get is not a
+  crash: E53 and E53b failed on hardware that was working and E59 counted
+  nineteen bundled loaders where the AppImage ships eight. `40-appimage.sh` now
+  resets `.preload` and removes the shims before anything runs, and refuses to
+  start if `shared/bin` holds a file the AppImage does not ship. If you are
+  debugging by hand, `rm -rf .tmp/AppDir` afterwards.
+- **`podman run --platform linux/arm64 <tag>` REPLACES the cached image for
+  that tag.** The pull is per-tag, not per-tag-per-arch, so one aarch64 probe
+  left `alpine:3.22` resolving to arm64 and the next suite run died with
+  `exec container process: Exec format error` on an image it had used all day.
+  `podman pull --platform linux/amd64 <tag>` puts it back. To run aarch64 code,
+  name `qemu-aarch64-static` instead -- section P does, and it also avoids
+  registering a binfmt handler, which is a kernel-wide setting.
+- **Ubuntu 14.04 and 16.04 are NOT on `old-releases.ubuntu.com`.** As of
+  2026-08 that host jumps straight from `saucy` to `utopic`; every
+  `dists/trusty/...` and `dists/xenial/...` path 404s. Both releases are still
+  inside their ESM window and are still served from **`archive.ubuntu.com` at
+  the default path**, so the `sources.list` rewrite that every guide prescribes
+  is what breaks them. What does have to go is the image's own ESM source,
+  which points at `esm.ubuntu.com` and needs credentials: apt fails the whole
+  update over it and then reports every package as "unable to locate", which
+  reads exactly like a dead mirror. `rm -f /etc/apt/sources.list.d/*esm*`.
+- **Handing sharun the host's library directories changes what the NO-SHIM
+  controls do.** With `/etc/ld.so.conf`'s directories on
+  `SHARUN_FALLBACK_LIBRARY_PATH`, `glxgears` renders on Alpine with no GL shim
+  at all -- through the X server's own softpipe GLX -- and E61 stops being a
+  control for anything. Add host directories only where a measurement showed
+  they are needed, and print that they were added.
 
 - **Debian's Vulkan ICD manifest names a bare soname, not a path.**
   `foreign-dlopen` only ever intercepts absolute paths, so on Debian the whole

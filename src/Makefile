@@ -12,6 +12,9 @@
 #   make traps AUDIT_LIBC=...  audit version-compat.c against a libc
 #   make gl-syms GLVND=<dir>         regenerate the GL/EGL forwarding tables
 #   make gl-syms-check GLVND=<dir>   fail if they no longer match
+#   make gles-syms GLES=<dir>        the same, for libGLESv2.so.2
+#   make gl-fwd-asm-check      do the aarch64 trampolines still assemble
+#   make gl-fwd-qemu-check     do they RUN, under qemu-user
 #   make clean
 
 CC      ?= cc
@@ -47,8 +50,11 @@ AUDIT_LIBC ?= $(firstword $(wildcard \
 # object it replaces exports. Only `make gl-syms*` needs this; an ordinary
 # build uses the tables already checked in.
 GLVND   ?= $(ROOT)/.tmp/AppDir/lib
+# The GLES table comes from an AppDir that BUNDLES GLES, which the
+# host-drivers demo does not. Separate knob, separate AppImage.
+GLES    ?= $(ROOT)/.tmp/gtk4x/AppDir/lib
 
-all: foreign-dlopen.so gl-fwd.so egl-fwd.so runtime-select
+all: foreign-dlopen.so gl-fwd.so egl-fwd.so gles-fwd.so runtime-select
 
 # The preload carries the shim: it is already in the global lookup scope, so
 # its exports satisfy undefined symbols in anything dlopen'd later (E2, E5).
@@ -70,7 +76,7 @@ foreign-dlopen.so: foreign-dlopen.c forward-shim.c version-compat.c
 # the IBT property note that matches the endbr64 the trampolines start with:
 # without the note a CET-enforcing host turns indirect-branch tracking off for
 # the whole process, which is a silent loss of a mitigation rather than a crash.
-gl-fwd.so: gl-fwd.c gl-fwd-gl.h
+gl-fwd.so: gl-fwd.c gl-fwd-gl.h ld-conf.h
 	$(CC) $(SOFLAGS) $(CFLAGS) -fcf-protection=full \
 		-DGLFWD_TABLE='"gl-fwd-gl.h"' -DGLFWD_TAG='"gl-fwd.so"' \
 		-Wl,-soname,libGL.so.1 gl-fwd.c -o $@ -ldl
@@ -78,7 +84,7 @@ gl-fwd.so: gl-fwd.c gl-fwd-gl.h
 
 # EGL's dispatcher finds its vendor through a JSON directory rather than a
 # libGLX_*.so.0, so the marker differs; everything else is the same object.
-egl-fwd.so: gl-fwd.c gl-fwd-egl.h
+egl-fwd.so: gl-fwd.c gl-fwd-egl.h ld-conf.h
 	$(CC) $(SOFLAGS) $(CFLAGS) -fcf-protection=full \
 		-DGLFWD_TABLE='"gl-fwd-egl.h"' -DGLFWD_TAG='"egl-fwd.so"' \
 		-DGLFWD_VENDOR_PREFIX='"libEGL_"' \
@@ -102,7 +108,27 @@ gl-fwd-verify:
 	   echo "FAIL: $(SO) soname is '$$son', want '$$wson'"; exit 1; fi; \
 	 echo "ok: $(SO) is $$son with all $$have entry points"
 
-runtime-select: runtime-select.c
+# GLES is the same shape a third time. libGLESv2.so.2 is a glvnd dispatcher
+# like libGL.so.1 and libEGL.so.1, it finds its implementation the way EGL does
+# -- a JSON file under /usr/share/glvnd/egl_vendor.d, because a GLES context
+# comes from EGL -- and on a classic-Mesa host there is no such file, so it has
+# nothing to dispatch to and every GLES entry point is a silent zero.
+#
+# The table is read out of the libGLESv2.so.2 bundled by the gtk4 demo AppImage
+# (358 entry points). The demo AppDir the rest of this suite uses bundles no
+# GLES at all, which is why this shim did not exist until an AppDir that does
+# turned up -- the generator's one rule is that the list comes out of the object
+# being replaced, and there was no object.
+gles-fwd.so: gl-fwd.c gl-fwd-gles2.h ld-conf.h
+	$(CC) $(SOFLAGS) $(CFLAGS) -fcf-protection=full \
+		-DGLFWD_TABLE='"gl-fwd-gles2.h"' -DGLFWD_TAG='"gles-fwd.so"' \
+		-DGLFWD_VENDOR_PREFIX='"libEGL_"' \
+		-DGLFWD_VENDOR_DIR='"/usr/share/glvnd/egl_vendor.d"' \
+		-DGLFWD_GETPROC='"eglGetProcAddress"' \
+		-Wl,-soname,libGLESv2.so.2 gl-fwd.c -o $@ -ldl
+	@$(MAKE) --no-print-directory gl-fwd-verify SO=$@ TBL=gl-fwd-gles2.h
+
+runtime-select: runtime-select.c ld-conf.h
 	$(CC) $(CFLAGS) $< -o $@ -ldl
 
 # Regenerate the shim for a different bundled glibc. This is 5.2 step 4: the
@@ -127,10 +153,9 @@ gl-syms-check:
 	$(PYTHON) $(ROOT)/tools/gen_gl_fwd.py $(GLVND)/libEGL.so.1 \
 		--prefix egl --prefix EGL --soname libEGL.so.1 --check gl-fwd-egl.h
 
-# The aarch64 trampolines cannot be RUN here -- this machine is x86_64 -- so
-# they are at least assembled, which catches the syntax errors that would
-# otherwise sit unnoticed until someone has the hardware. "It assembles" is a
-# weaker claim than "it works", and REPORT.md says so in those words.
+# Does the aarch64 half still assemble? Cheap, and it catches the syntax errors
+# that would otherwise sit unnoticed until someone has the hardware. It is the
+# WEAKER of the two checks: `make gl-fwd-qemu-check` below actually runs them.
 gl-fwd-asm-check:
 	@command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || { \
 	   echo "SKIPPED: no aarch64-linux-gnu-gcc. On Debian or Ubuntu:"; \
@@ -139,7 +164,44 @@ gl-fwd-asm-check:
 	   exit 0; }
 	aarch64-linux-gnu-gcc $(SOFLAGS) -O2 -c \
 		-DGLFWD_TABLE='"gl-fwd-gl.h"' gl-fwd.c -o /tmp/gl-fwd-aarch64.o
-	@echo "ok: the aarch64 trampolines assemble (not run: no hardware)"
+	@echo "ok: the aarch64 trampolines assemble (see gl-fwd-qemu-check for run)"
+
+# And do they RUN? qemu-user executes an aarch64 binary on an x86_64 kernel in
+# userspace, and everything under test -- trampoline, resolver, ld.so binding a
+# DT_NEEDED to a preloaded object with the same SONAME, dlopen -- is userspace.
+#
+# The emulator is named rather than reached through binfmt_misc: a binfmt
+# handler is a kernel registration that outlives the container and changes how
+# the machine treats every aarch64 file afterwards. Naming it changes nothing
+# outside this process, and needs no privilege.
+#
+# ⚠ `podman run --platform linux/arm64` is NOT the cheap alternative it looks
+# like: pulling a tag for another platform REPLACES the cached image for that
+# tag, and the next x86_64 run of that image dies with "Exec format error".
+#
+# experiments/run.ps1 section P (E76, E76b) is this check with the register and
+# absent-path assertions attached; this target is the quick standalone form.
+gl-fwd-qemu-check:
+	@command -v qemu-aarch64-static >/dev/null 2>&1 && \
+	 command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || { \
+	   echo "SKIPPED: needs qemu-user-static and gcc-aarch64-linux-gnu"; \
+	   echo "         apt-get install qemu-user-static gcc-aarch64-linux-gnu \\"; \
+	   echo "                         libc6-dev-arm64-cross"; \
+	   exit 0; }
+	@t=$$(mktemp -d); \
+	 printf 'void t_one(void){}\n' > $$t/tgt.c; \
+	 printf '#ifndef GLFWD_SONAME\n#define GLFWD_SONAME "libtgt.so"\n#define GLFWD_COUNT 1\n#endif\nGLFWD_SYM(0, t_one)\n' > $$t/tgt-fwd.h; \
+	 printf 'extern void t_one(void);\nint main(void){t_one();return 0;}\n' > $$t/m.c; \
+	 cp gl-fwd.c ld-conf.h $$t/; \
+	 aarch64-linux-gnu-gcc -shared -fPIC -O2 $$t/tgt.c -o $$t/libtgt.so -Wl,-soname,libtgt.so && \
+	 (cd $$t && aarch64-linux-gnu-gcc -shared -fPIC -O2 -DGLFWD_TABLE='"tgt-fwd.h"' \
+	     -Wl,-soname,libtgt.so gl-fwd.c -o tgt-fwd.so -ldl) && \
+	 aarch64-linux-gnu-gcc -O2 $$t/m.c -o $$t/m $$t/tgt-fwd.so && \
+	 qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+	     -E LD_PRELOAD=$$t/tgt-fwd.so -E ANYLINUX_GL_HOST_DIR=$$t $$t/m && \
+	 echo "ok: the aarch64 trampolines and resolver RAN under qemu-user" || \
+	 { echo "FAIL: the aarch64 build ran and did not succeed"; rm -rf $$t; exit 1; }; \
+	 rm -rf $$t
 
 # Does version-compat.c still cover every multi-version trap this libc has?
 # Run it against the NEWEST glibc you care about: the set only grows.
@@ -152,6 +214,7 @@ traps:
 	$(PYTHON) $(ROOT)/tools/version_traps.py $(AUDIT_LIBC) --check version-compat.c
 
 clean:
-	rm -f foreign-dlopen.so gl-fwd.so egl-fwd.so runtime-select
+	rm -f foreign-dlopen.so gl-fwd.so egl-fwd.so gles-fwd.so runtime-select
 
-.PHONY: all shim traps clean gl-syms gl-syms-check gl-fwd-verify gl-fwd-asm-check
+.PHONY: all shim traps clean gl-syms gl-syms-check gl-fwd-verify \
+        gl-fwd-asm-check gl-fwd-qemu-check

@@ -1463,15 +1463,56 @@ the build if the checked-in table and the bundled library disagree, and E60 runs
 that check against the real extracted AppDir on both hosts. A newer bundled
 libglvnd cannot add an entry point silently.
 
-### 9.4 Trampolines, not wrappers
+### 9.4 Trampolines, not wrappers -- and the slot that can run code
 
-Each entry point is two instructions:
+Each entry point is three instructions:
 
 ```asm
 glClearColor:
 	endbr64
-	jmp *glfwd_tab+8*NNN(%rip)
+	mov    $0xc1, %r11d            # 193, its own index
+	jmp    *glfwd_tab+8*193(%rip)
 ```
+
+The middle one is the whole of what changed since this section was first
+written, and it is worth the paragraph. A table slot is an ADDRESS, so nothing
+could happen AT a call: every entry point's fate had to be decided in a
+constructor, before the application had asked for anything. That forced two
+defects this file used to carry -- the host GL stack was loaded in every
+process whether or not it would ever be used, and an entry point the host does
+not implement was indistinguishable from one that worked and returned zero.
+
+The index is the repair. It is known at ASSEMBLY time, so the trampoline puts
+it in `%r11` -- the one register the SysV ABI lets a PLT destroy, which is
+exactly what makes it free to carry a value across a call boundary -- and jumps
+through the slot as before. A resolved slot ignores it. An unresolved slot
+points at `glfwd_resolve_asm`, and there the index is the whole message.
+
+`glfwd_resolve_asm` is `_dl_runtime_resolve` minus the bookkeeping: save `rax
+rdi rsi rdx rcx r8 r9 r10 xmm0-7`, call `glfwd_resolve_one(index)`, restore,
+tail-jump to whatever it returned. `and $-16,%rsp` after saving `%rbp` makes
+the alignment unconditional rather than argued -- a trampoline is reached from
+anywhere and the `movaps` faults on a misaligned address. On aarch64 the index
+rides in `x17`, because `x16` was already the branch register and both are the
+intra-procedure-call scratch registers that exist to be destroyed by veneers.
+
+E69 measures it with the same four shapes E58 uses, and adds the one E58 cannot
+ask: **the second call must agree with the first.** Single-sided, a resolver
+that got lucky once and a resolver that wrote the right address into the slot
+are indistinguishable.
+
+```
+E69  OK: first-call ints=204 floats=285.00 varargs=10 struct=[2..12]
+     second-call-identical=yes absent-returned=0
+```
+
+Two tables, not one. `glfwd_tab` is the jump table and stays lazy per name;
+`glfwd_addr` is what `dlsym` said, filled in ONE pass when the target loads.
+The split is about `dlerror()`: `dlsym` leaves a message behind on every miss,
+reading it to clear it is destructive, and doing the whole table in one pass
+confines that theft to a single moment -- the first GL call in the process --
+instead of scattering it through an application's lifetime. The shim says so
+under `ANYLINUX_LIB_DEBUG=1` when it actually took something.
 
 not a C function with a hand-written prototype. This is not a micro-optimisation.
 A tail jump preserves every argument register, the return value and the varargs
@@ -1493,10 +1534,12 @@ a jump that knows none of their shapes.
 
 Three details that are load-bearing:
 
-- **Every slot is initialised to a stub that returns zero**, not to NULL, and it
-  is initialised statically rather than in the constructor. A NULL slot is a
-  crash inside a GL call with no explanation, and a constructor-filled table has
-  an ordering hazard (9.6) that a static initialiser does not.
+- **Every slot is initialised statically**, to the resolver rather than to
+  NULL. A NULL slot is a crash inside a GL call with no explanation; a
+  constructor-filled table has an ordering hazard (9.6) that a static
+  initialiser does not; and an address decided before the application ran is
+  the thing 9.4 above is about. An entry point the target cannot provide ends
+  up at `glfwd_absent`, which returns zero in both return registers.
 - **`endbr64` is spelled as bytes**, so the floor's assembler cannot be too old
   for it, and the shims are built `-fcf-protection=full` so the object carries
   the matching IBT property note. Without the note, a CET-enforcing host turns
@@ -1654,28 +1697,79 @@ rather than presenting 2373 as a score. On the glvnd host the same line reads
 `3470 of 3470 ... (3470 exported, 0 via glXGetProcAddressARB, 0 absent)`, which
 is what transparency looks like when it is measured instead of asserted.
 
+**And calling one is now a line, not a zero.** This was the shim's own worst
+failure mode -- 1097 silent no-ops by construction, in a repository that spends
+more words warning about silent zeros than about anything else. The resolver in
+9.4 is what made it reportable: an absent name keeps its slot pointing at the
+resolver, so the FIRST call to it arrives somewhere that knows which name it is.
+
+```
+ [gl-fwd.so] >> ABSENT entry point called: glFooEXT -- this host's libGL.so.1
+                has no implementation; returning zero
+```
+
+Not fatal. Returning zero is what the application gets natively on a host where
+the name is equally absent, and making it fatal would be a policy decision about
+somebody else's Mesa taken inside a shim.
+
+⭐ **The question that could not be asked before: how many of the 1097 does a
+real application actually touch?**
+
+```
+alpine:3.22, glprobe through the full AppDir
+  libGL.so.1: 2373 of 3470 entry points resolved from the host library
+  libGL.so.1: 15 of 3470 entry points were CALLED (15 forwarded, 0 absent)
+              out of 2373 this host could resolve
+  absent entry points this application reached: 0
+```
+
+**Zero.** The estimate this replaces was "likely zero, and likely is the
+problem". The other number in that line is worth as much: `glprobe` touches
+**15 of 3470**, which is 0.4% -- and a real GTK4 application (9.11) touches 46
+GLES entry points and one GL one, because its renderer is GLES. "It replaces
+libGL" has always rested on the export count; these are the first measurements
+of use.
+
 ### 9.9 What it costs a process that never calls GL
 
-The shims are preloaded for every binary in the AppDir, so a Vulkan-only run
-loads the host GL stack and never touches it. That is a real cost and it is
-measured rather than waved at -- alpine:3.22, `vkprobe`, best of three:
+Nothing. That is a change: this section used to record 30 ms and 30 MB, and the
+gate that would have avoided them as deliberately not written.
+
+The shims are preloaded for every binary in an AppDir, so a Vulkan-only run
+used to load the whole host GL stack and never touch it. The reason it was not
+gated was that the gate under consideration -- "does anything in this process
+have a `DT_NEEDED` on the soname I am impersonating" -- means walking every
+loaded object's dynamic section, and `d_ptr` in a mapped `PT_DYNAMIC` may be
+absolute or link-time depending on the port (7.3). Trading a measured 30 MB for
+an unmeasured segfault class was not a trade worth making, and it still is not.
+
+The resolver in 9.4 removes the need for it. Nothing resolves until something
+calls, so the question "will this process use GL" never has to be answered in
+advance -- it answers itself, at the first call, by there being one.
+
+Measured on the process rather than on a clock, because "it started faster" is
+not evidence about what was loaded:
 
 ```
-no shims    0.24 s wall   230 MB max RSS
-both shims  0.27 s wall   260 MB max RSS
+E71   OK: shim mapped=1 target mapped=0 (called=-1)      links the soname, no call
+E71b  OK: shim mapped=1 target mapped=1 (called=204)     the same binary, one call
+E74   Vulkan-only run: 2 shim(s) loaded, 0 resolved, no host GL mapped
+E74b  the same shims, after a GL call: 2373 of 3470 entry points resolved
 ```
 
-30 ms and 30 MB, which is the host Mesa closure being mapped. It could be
-avoided with a gate -- "does anything in this process have a `DT_NEEDED` on the
-soname I am impersonating" -- and that gate was deliberately not written,
-because answering it means walking every loaded object's dynamic section, and
-`d_ptr` in a mapped `PT_DYNAMIC` may be absolute or link-time depending on the
-port (section 7.3). Trading a measured 30 MB for an unmeasured segfault class is
-not a trade worth making.
+E71 alone would also pass if the shim were simply broken, which is why E71b is
+the same binary one argument apart.
 
-The packaging answer is better anyway: an AppImage with no GL application in it
-does not list the shims in `.preload`. That is a decision the person building
-the AppDir can make correctly and the shim cannot.
+`ANYLINUX_GL_FWD_EAGER=1` restores the old behaviour -- resolve everything
+before `main()` -- so the cost of not doing it stays a measurement rather than a
+memory, and so "how much of this dispatcher could this host stand behind" can
+still be asked as a question about the host rather than about a particular run.
+In that mode the exit summary says the forwarded call count is NOT measured,
+rather than printing a smaller number under the same words.
+
+The packaging answer is still better for a bundle with no GL application in it:
+do not list the shims in `.preload`. That is a decision the person building the
+AppDir can make correctly and the shim cannot.
 
 ### 9.10 The generalisation, and the tool that makes it a measurement
 
@@ -1727,6 +1821,113 @@ scratch: `libva.so.2` (`<name>_drv_video.so` from `/usr/lib/dri`),
 (`/etc/OpenCL/vendors`), `libgbm.so.1`. Each is the same shape as the OpenGL one
 and none of them is a libc problem. They are named, not fixed.
 
+### 9.11 The third host class: pre-glvnd GLIBC
+
+Sections 9.1 to 9.10 measure two host classes, and the sentence they support --
+"every musl distro, and every pre-glvnd glibc distro" -- had evidence for one
+of them. Ubuntu 14.04 and 16.04 are the other: glibc, classic Mesa, no
+`libGLX_<vendor>.so.0` anywhere.
+
+| host | libc | Mesa | `glxgears` | `glprobe` | `eglprobe` |
+|---|---|---|---|---|---|
+| alpine:3.22 | musl | 25.1.8 | llvmpipe | OK | OK |
+| ubuntu:14.04 | glibc 2.19 | 10.1.3 | Gallium 0.4 on llvmpipe (LLVM 3.4) | OK | OK |
+| ubuntu:16.04 | glibc 2.23 | 18.0.5 | llvmpipe (LLVM 6.0) | OK | fails, and see below |
+| debian:trixie | glibc 2.41 | 25.0 (glvnd) | unchanged | unchanged | unchanged |
+
+**The resolution counts match an independent run on hardware nobody here has.**
+[issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1) reported
+Ubuntu 14.04 from a seven-distro matrix on an RX 580:
+
+```
+reported : 1889 of 3470 resolved (1405 exported, 484 via glXGetProcAddressARB, 1581 absent)
+measured : 1889 of 3470 resolved (1405 exported, 484 via glXGetProcAddressARB, 1581 absent)
+```
+
+Different hardware, different display path, different Mesa point release, same
+numbers. A generated table that reproduces to the entry point across eight Mesa
+versions is the strongest thing said about it anywhere in this report.
+
+**Two findings came out of 16.04 and neither is about the shim.**
+
+The first is the `/etc/ld.so.cache` blindness for the fourth time. The host
+`libGL.so.1` loads and 2354 of 3470 entry points resolve from it; then Mesa
+`dlopen`s its own `swrast_dri.so`, which needs `libLLVM-6.0.so.1`, which is
+reachable on that host only through the cache the bundled `ld.so` is patched to
+ignore (E13b). `libGL error: unable to load driver` and then an X error from
+`glXCreateContext` -- a display fault, apparently. Same bug as
+`CUDA_ERROR_NO_DEVICE` (E44) and `glXCreateContext failed` (E53a). **E77**
+measures it on every host and scores the DIAGNOSTIC rather than the outcome:
+the outcome depends on how a host packages its driver, but "when this bites,
+the process names the library it could not find" holds everywhere.
+
+The second changed how this suite predicts. `eglprobe` fails on 16.04 with the
+shims -- and natively:
+
+```
+native eglprobe on ubuntu:16.04, no AppImage, no preload, no shim
+  EGL_VERSION : 1.4   EGL_VENDOR : Mesa Project
+  readback rgba : 0 0 0 255 (want ~64 128 191 255)
+  FAILED: the pixel does not carry the colour that was set
+```
+
+Mesa 18.0.5 does not produce that pixel on that host at all, so a shim that did
+would be inventing one. **E78 and E79 build and run the probes natively, and
+E64 and E66 are predicted against that** rather than against a constant. The
+shim's claim is transparency; the yardstick for transparency is the host. This
+also corrects a hypothesis offered in the issue -- that the readback fails
+because the GL and EGL shims do not share dispatch state. There are no shims in
+the native run.
+
+### 9.12 A real application, a third dispatcher, and the bug they found
+
+Everything above runs against the host-drivers demo AppImage: `glxgears`,
+`vkcube`, and two probes written for this repository. That AppDir bundles a
+dispatcher and no Mesa, which is one of the two shapes an AppImage comes in and
+not the common one.
+
+The other shape is self-contained: `gtk4-demo`, 272 bundled libraries, its own
+Mesa, its own `libEGL_mesa.so.0`, a real GTK4 application. On musl Alpine, with
+the shims in `.preload`, it died with `SIGFPE`. Without them it ran.
+
+**The shim was wrong, and had been wrong since it was written.**
+`glfwd_host_has_vendor()` asked only whether the HOST had a vendor library.
+That is the right question for an AppImage built to use host drivers -- it
+bundles a dispatcher and no vendor, so if the host has none either there is
+nothing to dispatch to. It is the wrong question for an AppImage that bundles
+its whole Mesa: Alpine has no vendor library, the shim concluded "no vendor
+anywhere", and forwarded a bundled GTK4 onto Alpine's Mesa. Two Mesas, one
+process.
+
+`glfwd_bundle_has_vendor()` asks the other half. If the BUNDLE carries a vendor
+library, the bundled dispatcher is what the application was built and tested
+against and the shim leaves it alone. That is also what makes this shim safe to
+put in every AppImage's `.preload` rather than only in host-drivers ones.
+
+```
+E80a  as shipped, no shims          rc=143  (still running when the timeout ended)
+E80   gl + egl + gles shims         rc=143  (was 136 = SIGFPE)
+E81   target: the bundled dispatcher, because the BUNDLE has its own vendor library
+E82   3470 of 3470, 44 of 44, 358 of 358 entry points resolved
+E83   gtk4-demo called 1 GL, 13 EGL and 46 GLES entry points
+```
+
+**E83 is why the GLES shim exists.** GTK4 renders through GLES, not desktop GL.
+`libGLESv2.so.2` is a glvnd dispatcher with the same shape as the other two and
+it finds its implementation the way EGL does, through a JSON file under
+`/usr/share/glvnd/egl_vendor.d`; on a classic host there is none, and without
+`gles-fwd.so` those 358 entry points are 358 silent zeros. The table is 358
+entries read out of the `libGLESv2.so.2` this AppDir bundles -- which is why
+the shim could not exist before this AppDir did, since the generator's one rule
+is that the list comes out of the object being replaced.
+
+`libGLESv1_CM.so.1` is not covered. No AppImage available here bundles one, and
+that is the whole reason; one `make gles-syms` against an AppDir that has one is
+the entire job.
+
+⚠ **Note what found this.** Four synthetic cases, two host classes and 3470
+generated trampolines did not. One real application did, on the first run.
+
 ---
 
 ## 10. Measured versus assumed
@@ -1740,25 +1941,49 @@ the corpus test, and the five-distro `ld.so.cache` survey in
 **Assumed or UNVERIFIED:**
 
 - The tests still skipped above: hardware **Vulkan** and the DRM-native drivers
-  (T5.1), the proprietary **graphics** driver (T5.2), and aarch64 (T5.3). Each
-  names what would unblock it, and none of them is unblockable from this
-  machine. T3.3, `glxgears` on a musl host, is no longer among them.
-- **The aarch64 trampolines in `src/gl-fwd.c` are assembled, never run.**
-  `make gl-fwd-asm-check` (needs `gcc-aarch64-linux-gnu` **and**
-  `libc6-dev-arm64-cross`) produces the right instructions and the right
-  relocations --
+  (T5.1), the proprietary **graphics** driver (T5.2), and aarch64 hardware
+  (T5.3). Each names what would unblock it, and none of them is unblockable
+  from this machine. T3.3, `glxgears` on a musl host, is no longer among them.
+- **Hardware GL on the CLASSIC-Mesa path has never run here, and the reason is
+  structural.** The only GPU route on this machine is Mesa's `d3d12` Gallium
+  driver over `/dev/dxg`, which needs Mesa >= 21; every glibc distro at Mesa >=
+  21 uses libglvnd, and the classic holdouts are musl distros that do not build
+  `d3d12`. Measured: alpine:3.22 ships no `d3d12_dri.so`, and `/usr/lib/wsl/lib`
+  ships `libd3d12.so`, `libdxcore.so` and CUDA but no GL, GLX or EGL at all. It
+  is reported working on an RX 580 from outside
+  ([issue #1](https://github.com/Azathothas/dlopen-experiment/issues/1)); that
+  is not reproduced here and is not adopted as if it were.
+- **A GLES application has been measured, a GLES-on-classic-host REPAIR has
+  not.** E83 shows gtk4-demo calling 46 GLES entry points, but that AppImage
+  bundles its own vendor library, so `gles-fwd.so` forwarded to the BUNDLED
+  dispatcher. No AppDir here is both GLES-bundling and host-drivers, so the
+  case the GLES shim was written for -- a classic host with no EGL vendor -- is
+  covered by construction and by the GL and EGL cases that share its code path,
+  not by a measurement of its own.
+- **The aarch64 trampolines RUN, under qemu-user, and have never touched
+  aarch64 silicon.** This entry used to say "assembled, never run", which is a
+  weaker claim, and `make gl-fwd-qemu-check` plus E76/E76b replaced it: qemu
+  executes an aarch64 binary on an x86_64 kernel in userspace, and everything
+  under test is userspace -- the trampoline, the register-saving resolver,
+  ld.so binding a `DT_NEEDED` to a preloaded object with the same SONAME, and
+  `dlopen`.
 
 ```
-0000000000000c20 <glClearColor>:
-     c20: d503245f  bti  c
-     c24: 90000010  adrp x16, 0
-          R_AARCH64_ADR_PREL_PG_HI21  glfwd_tab+0x608
-     c28: f9400210  ldr  x16, [x16]
+t_ints:
+    bti  c
+    mov  w17, #0x0          # the index, in IP1 because x16 is the branch reg
+    adrp x16, glfwd_tab
+    ldr  x16, [x16, #272]
+    br   x16
+
+E76   OK: first-call ints=204 floats=285.00 varargs=10 struct=[2..12]
+      second-call-identical=yes absent-returned=0
+E76b  ABSENT entry point called: t_absent
 ```
 
-  -- and `0x608` is `8 * 193`, which is `glClearColor`'s index in the table. So
-  the addressing is right. Nothing has executed it. "It assembles" is a weaker
-  claim than "it works" and this is the only place the distinction is recorded.
+  What remains UNVERIFIED is aarch64 **hardware**: qemu-user emulates the
+  instructions, not a real memory model, and no Mesa has been driven through
+  these trampolines on an ARM machine.
 - **The `_glapi_tls_Dispatch` case that motivates `gl-fwd`'s `RTLD_GLOBAL` was
   not reproduced on a shipping Mesa here.** The mechanism is measured (E54,
   E55); the report that a real DRI driver still relies on it is against Mesa
@@ -1766,8 +1991,14 @@ the corpus test, and the five-distro `ld.so.cache` survey in
   separate `libglapi.so.0`, and Alpine 3.15's `swrast_dri.so` carries the
   `DT_NEEDED` edge. Section 9.5.
 - **1097 of 3470 GL entry points are unresolvable on Alpine's Mesa** and
-  forward to a stub that returns zero. That matches what an application would
-  get natively on that host, but no application here has called one.
+  forward to a stub that returns zero, which matches what an application would
+  get natively there. This entry used to end "but no application here has
+  called one", which was true and unmeasurable. It is measured now: a call to
+  one prints a line naming it, and `glprobe` reaches **zero** of the 1097 while
+  calling 15 of the 3470 (9.8). What is still UNVERIFIED is any application
+  that DOES reach one -- none of the four measured here does, so the
+  zero-returning path is exercised by construction and by E72, not by a real
+  program hitting it.
 - **T1.6 was not run under a thread sanitiser.** The crossings are exercised and
   bounded by a timeout, which catches a broken binding; it does not catch a race
   that happens not to fire.

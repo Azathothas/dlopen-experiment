@@ -4,7 +4,13 @@
 # MATCH / MISMATCH against it. A MISMATCH is a finding, not a failure of the harness.
 set -u
 apt-get update -qq >/dev/null 2>&1
+# The aarch64 cross toolchain and qemu-user are for section P, which RUNS the
+# aarch64 trampolines rather than only assembling them. They are installed
+# best-effort: if the host has no network for them the section SKIPS by name
+# (section 7) rather than failing a suite whose other 44 cases are unaffected.
 apt-get install -y -qq gcc binutils python3 >/dev/null 2>&1
+apt-get install -y -qq --no-install-recommends \
+    gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user-static >/dev/null 2>&1
 cd /work
 
 BASE_GLIBC=$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')
@@ -540,7 +546,7 @@ GLFWD_SYM(4, t_absent)
 CEOF
 # t_absent is in the table and NOT in libtgt.so, which is the 1097-entry-point
 # case in miniature: a name the shim must export and the host cannot provide.
-cp /repo/src/gl-fwd.c .
+cp /repo/src/gl-fwd.c /repo/src/ld-conf.h .
 gcc -shared -fPIC -O2 -Wall -Wextra -Wno-format-truncation -fcf-protection=full \
     -DGLFWD_TABLE='"tgt-fwd.h"' -DGLFWD_TAG='"tgt-fwd.so"' \
     -DGLFWD_GETPROC='"t_getproc"' \
@@ -644,6 +650,96 @@ run E72 OK "ABSENT entry point called: t_absent" \
 #      called. This is the counter B6 needs to stop guessing with.
 run E73 OK "5 of 5 entry points were CALLED (4 forwarded, 1 absent)" \
     fwd env ANYLINUX_LIB_DEBUG=1 ./tramp2
+
+echo
+echo "-- O. the shim asks the HOST where its libraries are ------------"
+#
+# The shim resolves exactly one soname, because ld.so cannot -- that name is
+# taken by the shim itself. WHERE it looks used to be a hardcoded list of
+# conventional directories, and that list was a guess about somebody else's
+# packaging. It drifted: Ubuntu's alternatives layout puts classic libGL.so.1
+# in <triplet>/mesa and classic libEGL.so.1 in <triplet>/mesa-egl, the list had
+# the first and not the second, and EGL therefore failed on every pre-glvnd
+# Ubuntu while GL worked. Reported from outside, in
+# Azathothas/dlopen-experiment#4.
+#
+# The repair is to stop guessing: /etc/ld.so.conf is where the host writes its
+# own answer down, in plain text, and src/ld-conf.h is now the ONE walk of it
+# that both gl-fwd.c and runtime-select.c use.
+#
+# Measured on a directory no list could contain, so a pass cannot come from the
+# hardcoded entries. The control is the same run with the conf file removed --
+# the mechanism's own presence, not an env switch invented to disable it.
+mkdir -p /opt/anylinux-unguessable-42 /etc/ld.so.conf.d
+cp libtgt.so /opt/anylinux-unguessable-42/libtgt.so
+[ -f /etc/ld.so.conf ] || printf 'include /etc/ld.so.conf.d/*.conf\n' > /etc/ld.so.conf
+confdir() { printf '/opt/anylinux-unguessable-42\n' > /etc/ld.so.conf.d/zz-anylinux.conf; }
+noconf()  { rm -f /etc/ld.so.conf.d/zz-anylinux.conf; }
+# No ANYLINUX_GL_HOST_DIR here: the whole question is whether the shim finds it
+# without being told, so the handoff that would tell it is left out.
+fwd_noenv() { env LD_PRELOAD="$PWD/tgt-fwd.so" ANYLINUX_LIB_DEBUG=1 "$@"; }
+
+# E75: the directory is named ONLY by /etc/ld.so.conf.d, and the shim finds it.
+confdir
+run E75 OK "target /opt/anylinux-unguessable-42/libtgt.so" fwd_noenv ./tramp2
+# E75b: the control that must FAIL. Same directory, same library, same
+#       binary -- conf file gone, so nothing names it and the shim comes up
+#       empty. Without this, E75 would also pass if the shim had simply
+#       guessed the directory, which is the habit being removed.
+noconf
+run E75b FAIL "no target; all 5 entry points return zero" fwd_noenv ./tramp2
+confdir
+
+echo
+echo "-- P. the aarch64 trampolines, RUN -----------------------------"
+#
+# "It assembles" is a weaker claim than "it works", and until now the aarch64
+# half of src/gl-fwd.c had only the weaker one: make gl-fwd-asm-check produced
+# correct instructions and correct relocations and executed none of them.
+#
+# This machine is x86_64 and there is no aarch64 silicon to borrow, but there
+# does not have to be. qemu-user runs an aarch64 binary on an x86_64 kernel in
+# userspace, and everything under test here IS userspace: the trampoline, the
+# register-saving resolver, ld.so's binding of a DT_NEEDED to a preloaded
+# object with the same SONAME, and dlopen.
+#
+# qemu-aarch64-static is invoked BY NAME rather than through binfmt_misc. A
+# binfmt handler is a kernel registration that outlives the container and
+# changes how the machine treats every aarch64 file afterwards; naming the
+# emulator changes nothing outside this process. It also needs no --privileged.
+#
+# ⚠ Do NOT reach for `podman run --platform linux/arm64` instead. Pulling a tag
+# for another platform REPLACES the cached image for that tag, so the next run
+# of the suite gets `exec container process: Exec format error` from an image
+# it has used a hundred times. That cost a run here.
+if ! command -v qemu-aarch64-static >/dev/null 2>&1 ||
+   ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    skip E76 "no qemu-aarch64-static or aarch64-linux-gnu-gcc: apt-get install qemu-user-static gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
+    skip E76b "as E76"
+else
+    mkdir -p a64 && cp gl-fwd.c ld-conf.h tgt.c tgt-fwd.h tramp2.c a64/ && cd a64
+    A64=aarch64-linux-gnu-gcc
+    $A64 -shared -fPIC -O2 tgt.c -o libtgt.so -Wl,-soname,libtgt.so 2>/dev/null
+    $A64 -shared -fPIC -O2 -Wall -Wextra -Wno-format-truncation \
+         -DGLFWD_TABLE='"tgt-fwd.h"' -DGLFWD_TAG='"tgt-fwd.so"' \
+         -DGLFWD_GETPROC='"t_getproc"' \
+         -Wl,-soname,libtgt.so gl-fwd.c -o tgt-fwd.so -ldl 2>/dev/null
+    $A64 -O2 tramp2.c -o tramp2 ./tgt-fwd.so 2>/dev/null
+    qemu() {
+        qemu-aarch64-static -L /usr/aarch64-linux-gnu \
+            -E LD_PRELOAD="$PWD/tgt-fwd.so" -E ANYLINUX_GL_HOST_DIR="$PWD" "$@"
+    }
+    # E76: the same four shapes E69 puts through the x86-64 resolver, through
+    #      the aarch64 one. x0-x7, x8's indirect-result pointer and q0-q7 all
+    #      surviving a bl in the middle of the forward, and the index arriving
+    #      in x17 because x16 was already the branch register.
+    run E76 OK "OK: first-call ints=204" qemu ./tramp2
+    # E76b: and the absent path, which is the arch-specific `mov x0,#0 / movi
+    #       d0,#0` rather than x86-64's `xor/pxor`.
+    run E76b OK "ABSENT entry point called: t_absent" \
+        qemu -E ANYLINUX_LIB_DEBUG=1 ./tramp2
+    cd ..
+fi
 
 echo
 echo "================================================================"

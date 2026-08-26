@@ -15,6 +15,12 @@
       debian:trixie-slim    glibc 2.41 host, OLDER than the bundled 2.44, so
                             nothing NEEDS rewriting. The regression case: does
                             turning the feature on break what already worked?
+      ubuntu:14.04          pre-glvnd GLIBC. The third host CLASS, and the
+      ubuntu:16.04          other half of "every musl distro and every
+                            pre-glvnd glibc distro": glibc, classic Mesa 10.1
+                            and 18.0.5, no libGLX_<vendor>.so.0, no Vulkan at
+                            all. Section J is what they are here for; the
+                            cases needing a Vulkan device SKIP by name.
 
     The demo AppImage is ~10 MB and is downloaded once into <repo>\.tmp, which
     is gitignored. Its sha256 is verified.
@@ -28,7 +34,8 @@
     Path to podman.exe or docker.exe. Auto-detected when omitted.
 
 .PARAMETER Only
-    'alpine' or 'debian' to run just one host.
+    One host: 'alpine', 'debian', 'ubuntu1404' or 'ubuntu1604'. 'both' is the
+    original two; 'all' (the default) adds the pre-glvnd glibc pair.
 
 .EXAMPLE
     .\appimage.ps1
@@ -36,7 +43,7 @@
 [CmdletBinding()]
 param(
     [string]$Engine,
-    [ValidateSet('alpine', 'debian', 'both')][string]$Only = 'both'
+    [ValidateSet('alpine', 'debian', 'ubuntu1404', 'ubuntu1604', 'gtk4', 'both', 'all')][string]$Only = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +54,11 @@ $Repo = Split-Path -Parent $Here
 $Work = Join-Path $Repo '.tmp'
 $Sha  = '712766f8a4dc6b5ea3193ed7bb0282b64c7b781f7334056416edd3d00e8960bd'
 $Url  = 'https://github.com/Samueru-sama/Anylinux-AppImages/releases/download/demo/vkcube+glxgears-host-drivers-demo-x86_64.AppImage'
+# The OTHER shape of AppImage: self-contained, its own Mesa, its own vendor
+# libraries, a real GTK4 application, and the only AppDir here that bundles
+# libGLESv2.so.2 -- which is what the GLES forwarding table is read out of.
+$Gtk4Sha = '577909eff286b385dc0e3dc1eda0ef42f92858418c449e89e426ef950a63eb89'
+$Gtk4Url = 'https://github.com/Samueru-sama/Anylinux-AppImages/releases/download/demo/gtk4-demo-x86_64.AppImage'
 
 function Resolve-Engine {
     if ($Engine) {
@@ -71,7 +83,8 @@ function Invoke-In {
         [Parameter(Mandatory)][string]$Image,
         [Parameter(Mandatory)][string]$Script,
         [switch]$Privileged,
-        [switch]$Gpu
+        [switch]$Gpu,
+        [switch]$Gtk4
     )
     $path = Join-Path $Here $Script
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing script: $path" }
@@ -87,6 +100,9 @@ function Invoke-In {
                   '-v', "${Here}:/scripts:ro")
         if ($Privileged) { $args += '--privileged' }
         if ($Gpu -and $script:GpuArgs) { $args += $script:GpuArgs }
+        # Mounted as its own root, not as a subdirectory of the shared work
+        # tree, so nothing can write one AppDir's files into the other's.
+        if ($Gtk4) { $args += @('-v', "$(Join-Path $Work 'gtk4x'):/g") }
         $args += @($Image, 'sh', "/scripts/$Script")
         & $engineExe @args 2>&1 | Out-Host
         $rc = $LASTEXITCODE
@@ -158,15 +174,47 @@ $rc = Invoke-In -Image 'alpine:3.22' -Script '45-build-musl-guest.sh'
 if ($rc -ne 0) { throw "musl guest build failed (exit $rc)" }
 
 $fail = 0
-if ($Only -in @('both', 'alpine')) {
+if ($Only -in @('both', 'all', 'alpine')) {
     Write-Host ""
     Write-Host "######## musl host: the case the complaint is about ########" -ForegroundColor Yellow
     if ((Invoke-In -Image 'alpine:3.22' -Script '43-host-alpine.sh' -Gpu) -ne 0) { $fail++ }
 }
-if ($Only -in @('both', 'debian')) {
+if ($Only -in @('both', 'all', 'debian')) {
     Write-Host ""
     Write-Host "######## glibc host: the regression case ########" -ForegroundColor Yellow
     if ((Invoke-In -Image 'debian:trixie-slim' -Script '44-host-debian.sh' -Gpu) -ne 0) { $fail++ }
+}
+# The third host class: glibc, but from before libglvnd existed. This is the
+# half of the claim that had no evidence on this machine.
+foreach ($u in @(
+    @{ Key = 'ubuntu1404'; Image = 'ubuntu:14.04'; Note = 'glibc 2.19, Mesa 10.1' },
+    @{ Key = 'ubuntu1604'; Image = 'ubuntu:16.04'; Note = 'glibc 2.23, Mesa 18.0.5' })) {
+    if ($Only -in @('all', $u.Key)) {
+        Write-Host ""
+        Write-Host "######## pre-glvnd glibc host: $($u.Image) -- $($u.Note) ########" -ForegroundColor Yellow
+        if ((Invoke-In -Image $u.Image -Script '46-host-ubuntu.sh' -Gpu) -ne 0) { $fail++ }
+    }
+}
+
+# The fifth stage is not a host, it is a different APPIMAGE: a real GTK4
+# application that bundles its own Mesa. It is the only case here with a GLES
+# dispatcher in it, and it is what found the shim preferring a host vendor
+# library over the bundle's own.
+if ($Only -in @('all', 'gtk4')) {
+    $g = Join-Path $Work 'gtk4-demo.AppImage'
+    if (-not (Test-Path -LiteralPath $g)) {
+        Write-Host "downloading the gtk4 demo AppImage (~30 MB)" -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri $Gtk4Url -OutFile $g
+    }
+    $gh = (Get-FileHash -LiteralPath $g -Algorithm SHA256).Hash.ToLower()
+    if ($gh -ne $Gtk4Sha) { throw "gtk4-demo.AppImage sha256 is $gh, expected $Gtk4Sha" }
+    if (-not (Test-Path -LiteralPath (Join-Path $Work 'gtk4x\AppDir'))) {
+        $rc = Invoke-In -Image 'debian:trixie-slim' -Script '48-extract-gtk4.sh' -Privileged
+        if ($rc -ne 0) { throw "gtk4 extraction failed (exit $rc)" }
+    }
+    Write-Host ""
+    Write-Host "######## a real application: gtk4-demo on musl Alpine ########" -ForegroundColor Yellow
+    if ((Invoke-In -Image 'alpine:3.22' -Script '47-gtk4.sh' -Gtk4) -ne 0) { $fail++ }
 }
 
 Write-Host ""

@@ -66,8 +66,14 @@ not a symbol problem at all and is not fixable by any amount of bridging;
 | Evidence table still holds | **36/36**, up from 14/14 | [`experiments/run.ps1`](experiments/run.ps1), cases in [`30-run-tests.sh`](experiments/30-run-tests.sh) |
 | AppImage end to end, on a real host driver | **40/40 glibc, 35/35 musl** (five named skips) | [`experiments/appimage.ps1`](experiments/appimage.ps1), cases in [`40-appimage.sh`](experiments/40-appimage.sh) |
 | **OpenGL on a host whose Mesa has no glvnd vendor library** | **`glxgears` renders on Alpine**, and a cleared pixel comes back `64 128 191 255` through 3470 forwarded entry points | E61-E64, [`src/gl-fwd.c`](src/gl-fwd.c), [`tests/glprobe.c`](tests/glprobe.c), [REPORT.md 9](REPORT.md) |
+| **The same on pre-glvnd GLIBC distros** | **Ubuntu 14.04 (Mesa 10.1) and 16.04 (Mesa 18.0.5)**, the other half of "every musl distro and every pre-glvnd glibc distro" | E61-E66 on those hosts, [`experiments/46-host-ubuntu.sh`](experiments/46-host-ubuntu.sh) |
+| **A real GTK4 application, self-contained AppImage, on musl** | **runs**, and calls **46 GLES, 13 EGL and 1 GL** entry points -- GTK4's renderer is GLES | E80-E83, [`experiments/47-gtk4.sh`](experiments/47-gtk4.sh) |
+| **GLES** | `libGLESv2.so.2`, **358 entry points**, same shim, third dispatcher | E82, [`src/gl-fwd-gles2.h`](src/gl-fwd-gles2.h) |
+| An entry point the host does not implement | **a line naming it at the first call**, not a silent zero; `glprobe` reaches **zero** of Alpine's 1097 | E72, E73, [REPORT.md 9.8](REPORT.md) |
+| The aarch64 trampolines | **run**, under qemu-user -- not only assembled | E76, `make gl-fwd-qemu-check` |
 | **EGL on the same host** | `EGL_NO_DISPLAY` -> a working surfaceless context | E65, E66, [`tests/eglprobe.c`](tests/eglprobe.c) |
 | Every bundled loader classified rather than assumed | **8 objects import `dlopen`, 0 unclassified** | E59, [`tools/plugin_boundaries.py`](tools/plugin_boundaries.py) |
+| The host GL stack in a process that never draws | **not loaded at all** -- nothing resolves until something calls | E71, E74, [REPORT.md 9.9](REPORT.md) |
 | A **closed-source** host driver, on real silicon | **4096 bytes round-tripped through an RTX 3050 Ti and verified**, from the AppImage's bundled glibc on Alpine | E41, [`tests/cudaprobe.c`](tests/cudaprobe.c), [REPORT.md 7.1](REPORT.md) |
 | Rendering on an actual GPU | **`GL_RENDERER = D3D12 (NVIDIA GeForce RTX 3050 Ti Laptop GPU)`, 101-121 FPS**, through the AppImage with no file changed | E53, [REPORT.md 7.5](REPORT.md) |
 | Cross-libc ABI microtests, T1.3-T1.7 | **26 crossings hold**; of six struct hazards, **two measured live, two measured benign, two argued** | E47-E50, [`tests/abi-host.c`](tests/abi-host.c), [REPORT.md 7.4](REPORT.md) |
@@ -254,11 +260,18 @@ obvious version is wrong:
   disagree. A hand-written 33-symbol version renders `glxgears` perfectly and
   dies on `glGetIntegerv`, which is why [`tests/glprobe.c`](tests/glprobe.c)
   calls past that set **and reads the cleared pixel back**.
-- **Each entry point is a two-instruction tail jump**, not a C wrapper. A tail
-  jump preserves every argument register, the return value and the varargs count
-  in `%al`, so it forwards any signature correctly -- including the ones nobody
-  typed out. E58 pins that with eight integer registers, nine float registers, a
-  varargs call and a struct return, through a jump that knows none of them.
+- **Each entry point is a tail jump, not a C wrapper.** A tail jump preserves
+  every argument register, the return value and the varargs count in `%al`, so
+  it forwards any signature correctly -- including the ones nobody typed out.
+  E58 pins that with eight integer registers, nine float registers, a varargs
+  call and a struct return, through a jump that knows none of them.
+  Each trampoline first loads its own index into `%r11`, the one register the
+  SysV ABI lets a PLT destroy, so an unresolved slot can reach a
+  register-saving resolver that knows WHICH entry point was called. That is
+  what makes the host stack load on first use rather than in a constructor, and
+  what makes an entry point the host cannot provide a line instead of a zero.
+  E69 puts the same four shapes through the resolver and checks the second call
+  agrees with the first.
 - **`RTLD_GLOBAL` is asked for by the shim, for the one object it opens.** A
   plugin can import a symbol with no `DT_NEEDED` edge to whoever defines it and
   rely on its loader's closure being in the global scope, which is where
@@ -332,7 +345,20 @@ section is what a user needs to know, not what a contributor should do next.
   this Mesa does not implement. They forward to a stub that returns zero. That
   is the same answer an application would get natively on that host, but the
   count is a property of the host's Mesa and the shim reports it rather than
-  hiding it (`ANYLINUX_LIB_DEBUG=1`).
+  hiding it (`ANYLINUX_LIB_DEBUG=1`). **Calling one is now a line naming it**,
+  at the first call, and `glprobe` reaches **zero** of the 1097 -- measured,
+  where that used to be a guess.
+- **The shim asks the host where its libraries are** rather than guessing.
+  A hardcoded list of conventional directories had `<triplet>/mesa` and not
+  `<triplet>/mesa-egl`, so EGL failed on every pre-glvnd Ubuntu while GL
+  worked. [`src/ld-conf.h`](src/ld-conf.h) reads `/etc/ld.so.conf` instead --
+  one walk, shared with [`src/runtime-select.c`](src/runtime-select.c) so there
+  is not a second parser to drift.
+- **A bundle that carries its own vendor library keeps it.** A self-contained
+  AppImage bundles all of Mesa; forwarding it to the host's because the *host*
+  has no vendor library puts two Mesas in one process, and that is a SIGFPE in
+  a real GTK4 application (E80). The bundle is what the application was built
+  against.
 
 Full per-test results, including every skipped test and the specific missing
 capability, are in [REPORT.md](REPORT.md).
